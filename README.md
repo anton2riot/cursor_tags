@@ -1,17 +1,17 @@
 # cursor_tags
 
-Патч, который прокачивает сайдбар чатов в Cursor: ярлыки, фильтрация по ним, перенос pin в меню, унесённая под ярлык индикация непрочитанного, стоимость чата.
+A patch that upgrades the chat sidebar in Cursor: labels, a separate Tagged section, pin moved into the context menu, unread indication relocated to the title color, and per-chat cost.
 
-## Что делает
+## What it does
 
-- **Ярлыки на чатах.** ПКМ по чату → выбрать ярлык (ВАЖНО / ПРОВЕРИТЬ / TODO и любые свои). Иконка ярлыка занимает место нативной точки, слева у чата появляется тонкая полоска цвета ярлыка.
-- **Раздел Tagged** в сайдбаре. Отдельная группа после Pinned со всеми чатами, у которых есть ярлык. Click переключает на чат, ПКМ открывает то же меню что и на оригинале.
-- **Pin / Unpin перенесён в ПКМ-меню.** Нативную точку/булавку в строке чата мы заняли своей иконкой ярлыка, поэтому Pin/Unpin теперь живёт в нашем меню.
-- **Индикация непрочитанного цветом текста.** Раньше Cursor показывал, что в чате есть новый ответ, цветом точки — мы её спрятали под ярлык, поэтому состояние перенесли на цвет заголовка чата (синий = есть новое).
-- **Имена воркспейсов жирным шрифтом.** Чтобы их было видно отдельно от названий чатов.
-- **Стоимость чата.** В ПКМ-меню — строка `💰 Стоимость: $X.XX` с суммой потраченных денег по чату (через приватный billing API Cursor). Клик по строке — форс-рефреш, иначе значение кэшируется на 10 минут.
+- **Labels on chats.** Right-click a chat → pick a label (IMPORTANT / REVIEW / TODO or whatever you define). The label icon takes the slot of the native status dot, and a thin colored stripe appears on the left side of the chat row.
+- **Tagged section** in the sidebar. A separate group below Pinned that lists every chat with a label. Click switches to the chat; right-click opens the same menu as on the original.
+- **Pin / Unpin moved into the context menu.** The native dot/pin button is now occupied by our label icon, so Pin/Unpin lives in our menu.
+- **Unread indication via title color.** Cursor used to show that a chat has a new reply by coloring the dot — we covered the dot with our icon, so the state was moved onto the chat title color (blue = there's something new).
+- **Workspace names in bold.** So they stand out from chat names below them.
+- **Per-chat cost.** A `💰 Cost: $X.XX` line in the context menu shows the total spent on this chat (via Cursor's private billing API). Click the line to force-refresh; otherwise the value is cached for 10 minutes.
 
-## Установка
+## Install
 
 ```powershell
 git clone git@github.com:anton2riot/cursor_tags.git
@@ -19,42 +19,42 @@ cd cursor_tags
 .\install.ps1
 ```
 
-Перезапустить Cursor.
+Restart Cursor.
 
-## Обновление
+## Update
 
 ```powershell
 git pull
 ```
 
-`install.ps1` запустится автоматически через git-хук. Если по какой-то причине нет — запусти руками.
+`install.ps1` runs automatically via a git hook. If for any reason it doesn't, run it manually.
 
-После авто-обновления самого Cursor патч стирается — повторить `.\install.ps1`.
+When Cursor auto-updates itself, the patch is wiped — just re-run `.\install.ps1`.
 
-## Свои ярлыки
+## Custom labels
 
-Список ярлыков — в `patch/labels.js`:
+The label set lives in `patch/labels.js`:
 
 ```js
 export const labels = [
-    { id: 'important', title: 'ВАЖНО',     color: '#e34234', icon: '🔴' },
-    { id: 'check',     title: 'ПРОВЕРИТЬ', color: '#9b59b6', icon: '🔍' },
+    { id: 'important', title: 'IMPORTANT', color: '#e34234', icon: '🔴' },
+    { id: 'review',    title: 'REVIEW',    color: '#9b59b6', icon: '🔍' },
     { id: 'todo',      title: 'TODO',      color: '#3498db', icon: '📌' }
 ];
 ```
 
-`id` — внутренний ключ (в UI не виден, не меняй у уже использующихся, иначе потеряешь метки на чатах). `title`, `color`, `icon` — что показывается в меню и на чате.
+`id` is an internal key (not shown in the UI — don't change it on labels already in use or you'll lose the marks on chats). `title`, `color`, `icon` are what shows up in the menu and on the chat.
 
-После правки запусти `.\install.ps1` и перезапусти Cursor.
+After editing, run `.\install.ps1` and restart Cursor.
 
-## Удаление
+## Uninstall
 
 ```powershell
 .\uninstall.ps1
 ```
 
-Метки на чатах остаются в `localStorage` — если поставишь патч снова, они вернутся.
+Marks on chats stay in `localStorage` — if you reinstall later, they come back.
 
 ---
 
-Технические детали реализации и dev-хелперы — в [INTERNALS.md](./INTERNALS.md).
+Implementation details and dev helpers — see [INTERNALS.md](./INTERNALS.md).
