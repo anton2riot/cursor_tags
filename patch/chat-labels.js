@@ -38,21 +38,17 @@
 .cl-menu-dot-none { border: 1px solid currentColor; background: transparent !important; }
 .cl-menu-icon { width: 14px; text-align: center; flex-shrink: 0; }
 
-/* Tagged section */
-.cl-tagged-section { list-style: none; padding: 0; margin: 0 0 4px 0; }
-.cl-tagged-header { padding: 4px 8px 4px 12px; font-size: 10px; font-weight: 600; text-transform: uppercase; opacity: 0.55; letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
-.cl-tagged-header:hover { opacity: 0.85; }
-.cl-tagged-caret { display: inline-block; transition: transform 0.12s; font-size: 9px; opacity: 0.7; }
+/* Tagged section: используем нативные классы Cursor для items, поэтому шрифт/padding/hover
+   наследуются от его CSS. Дописываем только collapsible-каретку и наш активный фон. */
+.cl-tagged-section { list-style: none; padding: 0; margin: 0; }
+.cl-tagged-section > .cl-tagged-header { font: inherit; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.55; padding: 6px 12px 4px; display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+.cl-tagged-section > .cl-tagged-header:hover { opacity: 0.85; }
+.cl-tagged-caret { display: inline-block; transition: transform 0.12s; font-size: 9px; opacity: 0.7; width: 9px; }
 .cl-tagged-section.cl-collapsed .cl-tagged-caret { transform: rotate(-90deg); }
-.cl-tagged-section.cl-collapsed .cl-tagged-list { display: none; }
+.cl-tagged-section.cl-collapsed > .cl-tagged-list { display: none; }
 .cl-tagged-count { margin-left: auto; opacity: 0.6; font-weight: 400; }
 .cl-tagged-list { list-style: none; padding: 0; margin: 0; }
-.cl-tagged-item { display: flex; align-items: center; gap: 6px; padding: 4px 12px; cursor: pointer; font-size: 12px; border-radius: 4px; margin: 0 4px; min-width: 0; }
-.cl-tagged-item:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.06)); }
-.cl-tagged-item.cl-active-chat { background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.25)); }
-.cl-tagged-item .cl-badge { width: 14px; }
-.cl-tagged-item-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cl-tagged-empty { padding: 4px 12px; font-size: 11px; opacity: 0.5; font-style: italic; }
+.cl-tagged-item.cl-active-chat .glass-sidebar-agent-menu-btn { background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.25)) !important; }
 `;
 
 	if (window.__cursorChatLabelsCleanup) {
@@ -129,31 +125,61 @@
 		return null;
 	}
 
-	// Defensive поиск pin/dot-кнопки в строке чата.
-	// Если у тебя точный селектор — допиши его в начало списка.
+	// Defensive поиск pin/dot-кнопки. Точка в незакреплённом чате имеет другое
+	// имя (не "pin"), поэтому ищем pin / dot / indicator / status / codicon.
 	function findPinButton(row) {
 		const explicit = [
 			'.glass-sidebar-agent-pin-btn',
 			'.glass-sidebar-agent-pin',
 			'.glass-sidebar-agent-status-btn',
-			'.ui-sidebar-menu-button-pin'
+			'.glass-sidebar-agent-status',
+			'.glass-sidebar-agent-indicator',
+			'.glass-sidebar-agent-dot',
+			'.ui-sidebar-menu-button-pin',
+			'.ui-sidebar-menu-button-status',
+			'.ui-sidebar-menu-button-indicator',
+			'.ui-sidebar-menu-button-icon',
+			'.ui-sidebar-menu-item-pin',
+			'.codicon-pin',
+			'.codicon-pinned',
+			'.codicon-circle-small',
+			'.codicon-circle-small-filled',
+			'.codicon-record-small',
+			'[class*="codicon-pin"]',
+			'[class*="codicon-dot"]'
 		];
 		for (const sel of explicit) {
 			const el = row.querySelector(sel);
-			if (el && el.dataset.clBadgeSlot !== '1') return el;
+			if (!el || el.dataset.clBadgeSlot === '1') continue;
+			// если это иконка внутри button — вернуть button (clickable родитель)
+			const btn = el.closest('button, [role="button"]');
+			return btn && btn.dataset.clBadgeSlot !== '1' ? btn : el;
 		}
-		// fallback: любой button/элемент с pin в class/aria/title
-		const candidates = row.querySelectorAll('button, [role="button"]');
-		for (const el of candidates) {
+		const all = row.querySelectorAll('*');
+		for (const el of all) {
+			if (el.dataset && el.dataset.clBadgeSlot === '1') continue;
 			const cls = ((el.className || '') + '').toLowerCase();
-			const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-			const title = (el.getAttribute('title') || '').toLowerCase();
-			if (cls.includes('pin') || aria.includes('pin') || title.includes('pin')) {
-				if (el.dataset.clBadgeSlot === '1') continue;
-				return el;
+			const aria = ((el.getAttribute && el.getAttribute('aria-label')) || '').toLowerCase();
+			const title = ((el.getAttribute && el.getAttribute('title')) || '').toLowerCase();
+			if (/(?:^|[\W_])pin(?:[\W_]|$)/.test(cls) || /pin/.test(aria) || /pin/.test(title)) {
+				return el.closest('button, [role="button"]') || el;
 			}
 		}
 		return null;
+	}
+
+	function isRowActive(row) {
+		if (!row) return false;
+		if (row.getAttribute('aria-selected') === 'true' || row.getAttribute('aria-current') === 'true') return true;
+		const cls = (row.className + '');
+		if (/(?:^|\s)(?:active|selected|is-active|is-selected)(?:\s|$)/.test(cls)) return true;
+		const btn = findFirst(row, SELECTORS.rowButton);
+		if (btn) {
+			if (btn.getAttribute('aria-selected') === 'true' || btn.getAttribute('aria-current') === 'true') return true;
+			const bcls = (btn.className + '');
+			if (/(?:^|\s)(?:active|selected|is-active|is-selected)(?:\s|$)/.test(bcls)) return true;
+		}
+		return false;
 	}
 
 	function isRowPinned(row) {
@@ -320,57 +346,85 @@
 			else item.remove();
 		});
 
-		// Обновить/создать
-		for (let i = 0; i < tagged.length; i++) {
-			const { row, key, label } = tagged[i];
-			let item = existingItems.get(key);
-			if (!item) {
-				item = document.createElement('li');
-				item.className = 'cl-tagged-item';
-				item.dataset.clKey = key;
-				const badge = document.createElement('span');
-				badge.className = 'cl-badge';
-				item.appendChild(badge);
-				const text = document.createElement('span');
-				text.className = 'cl-tagged-item-text';
-				item.appendChild(text);
-				item.addEventListener('click', (ev) => {
-					ev.preventDefault();
-					ev.stopPropagation();
-					const orig = item.__clOriginalRow;
-					if (!orig || !orig.isConnected) {
-						// Найти заново по ключу
-						for (const r of findAll(document, SELECTORS.row)) {
-							if (r.closest('.cl-tagged-section')) continue;
-							if (getChatKey(r) === item.dataset.clKey) {
-								const b = findFirst(r, SELECTORS.rowButton);
-								if (b) b.click();
-								return;
-							}
-						}
-						return;
-					}
-					const b = findFirst(orig, SELECTORS.rowButton);
-					if (b) b.click();
-				});
-				list.appendChild(item);
-			}
-			item.__clOriginalRow = row;
-			const badge = item.querySelector(':scope > .cl-badge');
-			if (badge.textContent !== label.icon) badge.textContent = label.icon;
-			badge.title = label.title;
-			const text = item.querySelector(':scope > .cl-tagged-item-text');
-			if (text.textContent !== key) text.textContent = key;
-		}
-
-		// Восстановим порядок (сортируем по id ярлыка, потом по имени)
-		const sorted = [...tagged].sort((a, b) => {
+		// Сортируем по id ярлыка, затем по имени
+		tagged.sort((a, b) => {
 			const ai = LABELS.findIndex(l => l.id === a.label.id);
 			const bi = LABELS.findIndex(l => l.id === b.label.id);
 			if (ai !== bi) return ai - bi;
 			return a.key.localeCompare(b.key);
 		});
-		for (const t of sorted) {
+
+		// Обновить/создать. Имитируем нативную разметку row, чтобы шрифт/padding/hover
+		// наследовались от стилей Cursor.
+		for (let i = 0; i < tagged.length; i++) {
+			const { row, key, label } = tagged[i];
+			let item = existingItems.get(key);
+			if (!item) {
+				item = document.createElement('li');
+				item.className = 'ui-sidebar-menu-item cl-tagged-item';
+				item.dataset.clKey = key;
+				const btn = document.createElement('div');
+				btn.className = 'glass-sidebar-agent-menu-btn cl-tagged-btn';
+				btn.setAttribute('role', 'button');
+				btn.tabIndex = 0;
+				const content = document.createElement('div');
+				content.className = 'ui-sidebar-menu-button-content';
+				const labelEl = document.createElement('div');
+				labelEl.className = 'ui-sidebar-menu-button-label';
+				labelEl.style.display = 'inline-flex';
+				labelEl.style.alignItems = 'center';
+				labelEl.style.gap = '6px';
+				labelEl.style.minWidth = '0';
+				const badge = document.createElement('span');
+				badge.className = 'cl-badge';
+				badge.style.flexShrink = '0';
+				const text = document.createElement('span');
+				text.className = 'cl-tagged-item-text';
+				text.style.overflow = 'hidden';
+				text.style.textOverflow = 'ellipsis';
+				text.style.whiteSpace = 'nowrap';
+				text.style.minWidth = '0';
+				labelEl.appendChild(badge);
+				labelEl.appendChild(text);
+				content.appendChild(labelEl);
+				btn.appendChild(content);
+				item.appendChild(btn);
+
+				const clickHandler = (ev) => {
+					ev.preventDefault();
+					ev.stopPropagation();
+					ev.stopImmediatePropagation();
+					const orig = item.__clOriginalRow;
+					const tryClick = (r) => {
+						const b = findFirst(r, SELECTORS.rowButton);
+						if (b) { b.click(); return true; }
+						return false;
+					};
+					if (orig && orig.isConnected && tryClick(orig)) return;
+					for (const r of findAll(document, SELECTORS.row)) {
+						if (r.closest('.cl-tagged-section')) continue;
+						if (getChatKey(r) === item.dataset.clKey) { tryClick(r); return; }
+					}
+				};
+				btn.addEventListener('click', clickHandler, true);
+				btn.addEventListener('mousedown', (ev) => { ev.stopPropagation(); }, true);
+				list.appendChild(item);
+			}
+			item.__clOriginalRow = row;
+			const badge = item.querySelector('.cl-badge');
+			if (badge && badge.textContent !== label.icon) badge.textContent = label.icon;
+			if (badge) badge.title = label.title;
+			const text = item.querySelector('.cl-tagged-item-text');
+			if (text && text.textContent !== key) text.textContent = key;
+
+			// Подсвечивать активный чат
+			const isActive = isRowActive(row);
+			const wasActive = item.classList.contains('cl-active-chat');
+			if (isActive !== wasActive) item.classList.toggle('cl-active-chat', isActive);
+		}
+
+		// Восстановить порядок согласно sorted (сначала собираем уже размещённые)
+		for (const t of tagged) {
 			const item = list.querySelector(`:scope > .cl-tagged-item[data-cl-key="${CSS.escape(t.key)}"]`);
 			if (item) list.appendChild(item);
 		}
@@ -608,46 +662,70 @@
 		console.groupEnd();
 	};
 
-	// Diagnostics: запусти в DevTools и пришли вывод, если что-то не работает.
+	// Diagnostics: запусти в DevTools и пришли вывод. Дампит подробно один
+	// незакреплённый row (где есть та "точка"), один закреплённый row (если есть),
+	// активный row, контейнеры и headings — этого хватит чтобы подогнать селекторы.
 	window.__cursorChatLabelsInspect = function() {
 		const lines = [];
 		const log = (s) => lines.push(s);
 		log('=== chat-labels inspect ===');
-
-		const rows = document.querySelectorAll('li.ui-sidebar-menu-item');
-		log(`Total rows: ${rows.length}`);
+		log('Cursor user-agent: ' + navigator.userAgent);
 		log('');
 
-		if (rows.length > 0) {
-			const row = rows[0];
-			log('--- ROW [0] outerHTML (truncated 3000) ---');
-			log(row.outerHTML.slice(0, 3000));
+		const rows = Array.from(document.querySelectorAll('li.ui-sidebar-menu-item'))
+			.filter(r => !r.closest('.cl-tagged-section'));
+		log(`Total rows (excl. our Tagged clones): ${rows.length}`);
+		log('');
+
+		// Найти разные классы row для дампа
+		const stored = loadStoredLabels();
+		const unpinned = rows.find(r => !isRowPinned(r));
+		const pinned = rows.find(r => isRowPinned(r));
+		const active = rows.find(r => isRowActive(r));
+
+		function dumpRow(label, row) {
+			if (!row) { log(`--- ${label}: NOT FOUND ---`); log(''); return; }
+			log(`--- ${label}: outerHTML (truncated 3500) ---`);
+			log(row.outerHTML.slice(0, 3500));
 			log('');
-			log('--- ROW [0] element tree (depth + tag.classes) ---');
+			log(`--- ${label}: element tree ---`);
 			function walk(el, depth) {
 				const cls = ((el.className || '') + '').trim().split(/\s+/).filter(c => c).join('.');
 				const aria = el.getAttribute && el.getAttribute('aria-label');
 				const title = el.getAttribute && el.getAttribute('title');
 				const role = el.getAttribute && el.getAttribute('role');
-				const txt = (el.children.length === 0 && el.textContent) ? `"${el.textContent.trim().slice(0, 30)}"` : '';
+				const ariaSelected = el.getAttribute && el.getAttribute('aria-selected');
+				const txt = (el.children.length === 0 && el.textContent) ? `"${el.textContent.trim().slice(0, 40)}"` : '';
 				let summary = `${'  '.repeat(depth)}${el.tagName.toLowerCase()}${cls ? '.' + cls : ''}`;
 				if (aria) summary += ` aria="${aria}"`;
 				if (title) summary += ` title="${title}"`;
 				if (role) summary += ` role="${role}"`;
+				if (ariaSelected) summary += ` aria-selected="${ariaSelected}"`;
 				if (txt) summary += ` ${txt}`;
 				log(summary);
 				for (const c of el.children) walk(c, depth + 1);
 			}
 			walk(row, 0);
 			log('');
-			log('--- Pin button candidate ---');
+			log(`--- ${label}: findPinButton result ---`);
 			const pin = findPinButton(row);
-			log(pin ? `Found: ${pin.tagName.toLowerCase()}.${pin.className} aria="${pin.getAttribute('aria-label') || ''}"` : 'NOT FOUND');
+			if (pin) {
+				log(`  Found: ${pin.tagName.toLowerCase()}.${(pin.className + '').trim()} aria="${pin.getAttribute('aria-label') || ''}" title="${pin.getAttribute('title') || ''}"`);
+			} else {
+				log('  NOT FOUND — нужно дописать селектор в findPinButton');
+			}
+			log(`--- ${label}: isRowActive=${isRowActive(row)} isRowPinned=${isRowPinned(row)} ---`);
+			log('');
 		}
 
-		log('');
-		log('--- Sidebar section headings (looking for "Pinned" / "Workspaces") ---');
-		document.querySelectorAll('h1, h2, h3, h4, h5, [role="heading"], [class*="header" i]').forEach(h => {
+		dumpRow('UNPINNED ROW (для слота под нашу иконку)', unpinned);
+		dumpRow('PINNED ROW (узнать как Cursor помечает закреп)', pinned);
+		if (active && active !== unpinned && active !== pinned) {
+			dumpRow('ACTIVE ROW (для подсветки в Tagged)', active);
+		}
+
+		log('--- Sidebar headings (поиск "Pinned" / "Workspaces" для стилизации Tagged) ---');
+		document.querySelectorAll('h1, h2, h3, h4, h5, [role="heading"], [class*="header" i], [class*="title" i]').forEach(h => {
 			const txt = (h.textContent || '').trim();
 			if (!txt || txt.length > 80) return;
 			const cls = ((h.className || '') + '').trim().split(/\s+/).filter(c => c).slice(0, 5).join('.');
@@ -655,12 +733,12 @@
 		});
 
 		log('');
-		log('--- Containers near rows (parents up to 3 levels) ---');
+		log('--- Containers вверх от первого row ---');
 		if (rows.length > 0) {
 			let p = rows[0].parentElement;
 			let depth = 0;
-			while (p && depth < 4) {
-				const cls = ((p.className || '') + '').trim().split(/\s+/).filter(c => c).slice(0, 4).join('.');
+			while (p && depth < 6) {
+				const cls = ((p.className || '') + '').trim().split(/\s+/).filter(c => c).slice(0, 5).join('.');
 				log(`  [${depth}] ${p.tagName.toLowerCase()}${cls ? '.' + cls : ''}`);
 				p = p.parentElement;
 				depth++;
@@ -668,13 +746,18 @@
 		}
 
 		log('');
-		log('--- Elements with "pin" in class/aria/title (whole document) ---');
+		log('--- Все элементы с pin/dot/indicator/status в class/aria/title (документ) ---');
+		const seen = new Set();
 		document.querySelectorAll('*').forEach(el => {
 			const cls = ((el.className || '') + '').toLowerCase();
 			const aria = ((el.getAttribute && el.getAttribute('aria-label')) || '').toLowerCase();
 			const title = ((el.getAttribute && el.getAttribute('title')) || '').toLowerCase();
-			if (/(^|\W)pin(\W|$)/.test(cls) || aria.includes('pin') || title.includes('pin')) {
-				const c = ((el.className || '') + '').trim().split(/\s+/).filter(x => x).slice(0, 4).join('.');
+			const haystack = cls + ' ' + aria + ' ' + title;
+			if (/(?:^|\W)(pin|dot|indicator|status|bullet|leading|circle-small)(?:\W|$)/.test(haystack)) {
+				const key = (el.tagName + '|' + cls + '|' + aria).slice(0, 100);
+				if (seen.has(key)) return;
+				seen.add(key);
+				const c = ((el.className || '') + '').trim().split(/\s+/).filter(x => x).slice(0, 6).join('.');
 				log(`  ${el.tagName.toLowerCase()}.${c} aria="${aria}" title="${title}"`);
 			}
 		});
