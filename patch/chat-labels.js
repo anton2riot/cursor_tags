@@ -272,28 +272,48 @@
 	};
 	document.addEventListener('contextmenu', contextMenuHandler, true);
 
-	// ---- Загрузка конфига labels.js и запуск ---------------------------------
-	(async () => {
+	// ---- Загрузка конфига labels.js (с cache-bust для hot-reload) -----------
+	const CONFIG_BASE_URL = new URL('./labels.js', import.meta.url).href;
+
+	async function loadConfig({ bust = false } = {}) {
+		const url = bust ? `${CONFIG_BASE_URL}?t=${Date.now()}` : CONFIG_BASE_URL;
 		try {
-			const configUrl = new URL('./labels.js', import.meta.url).href;
-			const mod = await import(configUrl);
+			const mod = await import(url);
 			const loaded = mod.labels || mod.default;
 			if (Array.isArray(loaded) && loaded.length > 0) {
 				userLabels = loaded.filter(l => l && l.id && l.id !== 'none');
 				LABELS = [NONE_LABEL, ...userLabels];
-				console.log('[chat-labels] config loaded from labels.js', userLabels.length, 'labels');
-			} else {
-				console.warn('[chat-labels] labels.js exports пустой / некорректный, используются дефолты');
+				console.log('[chat-labels] config loaded:', userLabels.length, 'labels');
+				return true;
 			}
+			console.warn('[chat-labels] labels.js exports пустой / некорректный, используются дефолты');
 		} catch (err) {
 			console.warn('[chat-labels] labels.js не загрузился, используются дефолты', err);
 		}
+		return false;
+	}
 
+	(async () => {
+		await loadConfig();
 		observer.observe(document.body, { childList: true, subtree: true });
 		runDecorateNow();
 		const initialCount = findAll(document, SELECTORS.row).length;
 		console.log('%c[chat-labels v4] booted', 'color: #27ae60; font-weight: bold', { rowsDecorated: initialCount, labels: userLabels.length });
 	})();
+
+	// Hot-reload конфига без перезапуска Cursor: вызови в DevTools после правки labels.js.
+	window.__cursorChatLabelsReloadConfig = async function() {
+		const ok = await loadConfig({ bust: true });
+		// Удалить ВСЕ существующие бейджи и cl-has-label, чтобы applyBadge
+		// пересоздал их с новыми icon/color из обновлённого конфига.
+		document.querySelectorAll('.cl-badge').forEach(el => el.remove());
+		document.querySelectorAll('.cl-has-label').forEach(el => {
+			el.classList.remove('cl-has-label');
+			el.style.removeProperty('--cl-color');
+		});
+		runDecorateNow();
+		return ok ? 'config reloaded' : 'config not loaded — using defaults';
+	};
 
 	window.__cursorChatLabelsCleanup = function() {
 		observerDisabled = true;

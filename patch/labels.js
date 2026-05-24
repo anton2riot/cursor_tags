@@ -14,7 +14,7 @@
  * Порядок в массиве = порядок в меню. Удаляй/добавляй сколько хочешь.
  */
 export const labels = [
-	{ id: 'important', title: 'ВАЖНО',     color: '#e34234', icon: '🔴' },
-	{ id: 'check',     title: 'ПРОВЕРИТЬ', color: '#9b59b6', icon: '🔍' },
-	{ id: 'todo',      title: 'TODO',      color: '#3498db', icon: '📌' }
+	{ id: 'important', title: 'ВАЖНО',     color: '#ffb02e', icon: '⚠️' },
+	{ id: 'check',     title: 'ПРОВЕРИТЬ', color: '#e34234', icon: '❓' },
+	{ id: 'todo',      title: 'TODO',      color: '#9b59b6', icon: '🔜' }
 ];

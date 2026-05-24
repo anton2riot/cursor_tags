@@ -56,7 +56,21 @@ export const labels = [
 - `color` — любой CSS-цвет.
 - `icon` — эмодзи или Unicode-символ.
 
-После правки запусти `install.ps1` (или сделай `git pull` если правки в репо).
+**Применить правку:**
+
+```powershell
+.\install.ps1
+```
+
+После этого:
+- **С перезапуском Cursor** — закрыл/открыл, готово.
+- **Без перезапуска** — открой DevTools (`Ctrl+Shift+I`) → Console:
+  ```js
+  __cursorChatLabelsReloadConfig()
+  ```
+  Подхватит свежий `labels.js` и переприменит ярлыки. Удобно при подборе цветов/иконок.
+
+> Важно: правки в `C:\playrix\cursor_tags\patch\labels.js` сами по себе на Cursor не влияют — Cursor читает копию в установке (`...\Programs\cursor\_\resources\app\out\vs\code\electron-sandbox\workbench\cursor-chat-labels\labels.js`). `install.ps1` копирует туда `patch/*`.
 
 ## Удаление
 
@@ -89,8 +103,9 @@ cursor_tags/
 Открой DevTools в Cursor (`Ctrl+Shift+I`) → Console:
 
 ```js
-__cursorChatLabelsDebug()   // что нашлось, состояние observer'а
-__cursorChatLabelsCleanup() // снять патч в текущем окне (до перезапуска)
+__cursorChatLabelsDebug()         // что нашлось, состояние observer'а
+__cursorChatLabelsReloadConfig()  // перечитать labels.js без рестарта Cursor
+__cursorChatLabelsCleanup()       // снять патч в текущем окне (до перезапуска)
 ```
 
 При зависании — снять инжект руками: открой `workbench.html` в Cursor install и удали блок между `<!-- cursor-chat-labels:start -->` и `<!-- cursor-chat-labels:end -->`. Или просто запусти `uninstall.ps1`.
