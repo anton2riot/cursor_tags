@@ -101,7 +101,7 @@
 	const COST_AUTH_KEY = 'cursor-chat-labels-cost-auth-v1';
 	const COST_RUNTIME_COMPOSERS_KEY = 'cursor-chat-labels-runtime-composers-v1';
 	const COST_CACHE_TTL_MS = 10 * 60 * 1000;
-	const COST_RECENT_CLICK_TTL_MS = 8000;
+	const COST_RECENT_CLICK_TTL_MS = 30000;
 	const COST_API_URL = 'https://api2.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents';
 
 	const DEFAULT_LABELS = [
@@ -843,6 +843,50 @@
 	function isCursorApiUrl(u) {
 		return typeof u === 'string' && u.includes('api2.cursor.sh');
 	}
+	// gRPC-web endpoints, на которых composerId реально едет в теле запроса.
+	// Auto-complete telemetry / usage dashboard сюда не попадают — там composerId
+	// либо отсутствует, либо чужой (другой чат). Фильтр спасает от ложных пар.
+	const COMPOSER_URL_RE = /Compose|Chat|Agent|Bubble|Generate|Stream|Conversation/i;
+	const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+	// Извлекает все UUID из body любого формата (string / ArrayBuffer / Uint8Array /
+	// Blob — Blob async, его пропускаем). Cursor шлёт protobuf, но composerId внутри
+	// него — обычная ASCII-строка UUID, поэтому grep по тексту работает.
+	function extractUuidsFromBody(body) {
+		if (!body) return [];
+		try {
+			let s = '';
+			if (typeof body === 'string') {
+				s = body;
+			} else if (body instanceof ArrayBuffer) {
+				s = new TextDecoder('utf-8', { fatal: false }).decode(body);
+			} else if (ArrayBuffer.isView(body)) {
+				s = new TextDecoder('utf-8', { fatal: false }).decode(body);
+			} else if (body instanceof URLSearchParams) {
+				s = body.toString();
+			}
+			if (!s) return [];
+			const m = s.match(UUID_RE);
+			return m ? Array.from(new Set(m.map(u => u.toLowerCase()))) : [];
+		} catch { return []; }
+	}
+	function maybeCaptureFromUrlAndBody(url, body) {
+		if (!url || !COMPOSER_URL_RE.test(url)) return;
+		const uuids = extractUuidsFromBody(body);
+		for (const u of uuids) captureComposerFromFetch(u);
+	}
+	function maybeCaptureTeamIdFromBody(body) {
+		if (!body) return;
+		try {
+			// teamId — обычно в JSON-теле (например на usage-endpoint'ах). Парсим только JSON.
+			if (typeof body !== 'string') return;
+			if (body.length === 0 || body.charCodeAt(0) !== 0x7b) return;
+			const parsed = JSON.parse(body);
+			if (parsed && typeof parsed.teamId === 'number' && parsed.teamId > 0) {
+				const stored = loadCostAuth();
+				if (stored.teamId !== parsed.teamId) saveCostAuth({ teamId: parsed.teamId });
+			}
+		} catch { /* ignore */ }
+	}
 	const _ourFetch = function(input, init) {
 		try {
 			let url = '';
@@ -862,26 +906,32 @@
 					if (stored.token !== auth) saveCostAuth({ token: auth });
 				}
 				const body = init && init.body;
-				if (typeof body === 'string' && body.length > 0 && body.charCodeAt(0) === 0x7b /* { */) {
-					try {
-						const parsed = JSON.parse(body);
-						if (parsed && typeof parsed.teamId === 'number' && parsed.teamId > 0) {
-							const stored = loadCostAuth();
-							if (stored.teamId !== parsed.teamId) saveCostAuth({ teamId: parsed.teamId });
-						}
-						// Live capture: composerId/cloudAgentId/bubbleId.composerId — что найдём.
-						// При походе по api2.cursor.sh после click на чате — связываем
-						// title последнего кликнутого ряда с этим composerId.
-						const cid = (parsed && (parsed.composerId || parsed.cloudAgentId)) ||
-							(parsed && parsed.bubbleId && parsed.bubbleId.composerId) || null;
-						if (cid) captureComposerFromFetch(cid);
-					} catch { /* not json or not interesting */ }
-				}
+				maybeCaptureTeamIdFromBody(body);
+				maybeCaptureFromUrlAndBody(url, body);
 			}
 		} catch (err) { /* never break fetch */ }
 		return _origFetch(input, init);
 	};
 	window.fetch = _ourFetch;
+
+	// Hook XMLHttpRequest — Cursor может ходить и через XHR (особенно для
+	// streamed чатов). Без этого composerId «холодных» чатов не подхватывается.
+	const _origXhrOpen = XMLHttpRequest.prototype.open;
+	const _origXhrSend = XMLHttpRequest.prototype.send;
+	XMLHttpRequest.prototype.open = function(method, url) {
+		try { this.__clUrl = url; } catch { /* ignore */ }
+		return _origXhrOpen.apply(this, arguments);
+	};
+	XMLHttpRequest.prototype.send = function(body) {
+		try {
+			const u = this.__clUrl;
+			if (isCursorApiUrl(u || '')) {
+				maybeCaptureFromUrlAndBody(u, body);
+				maybeCaptureTeamIdFromBody(body);
+			}
+		} catch { /* never break xhr */ }
+		return _origXhrSend.apply(this, arguments);
+	};
 
 	function loadCostCache() {
 		try { return JSON.parse(localStorage.getItem(COST_CACHE_KEY) || '{}') || {}; }
@@ -1222,6 +1272,10 @@
 		if (window.fetch === _ourFetch) {
 			try { window.fetch = _origFetch; } catch { /* readonly? */ }
 		}
+		try {
+			if (XMLHttpRequest.prototype.open !== _origXhrOpen) XMLHttpRequest.prototype.open = _origXhrOpen;
+			if (XMLHttpRequest.prototype.send !== _origXhrSend) XMLHttpRequest.prototype.send = _origXhrSend;
+		} catch { /* ignore */ }
 		document.querySelectorAll('.cl-badge, .cl-menu, .cl-tagged-group, #cursor-chat-labels-style').forEach(el => el.remove());
 		document.querySelectorAll('.cl-has-label, .cl-hide-status').forEach(el => {
 			el.classList.remove('cl-has-label');
@@ -1257,6 +1311,27 @@
 		try { localStorage.removeItem(COST_CACHE_KEY); }
 		catch { /* ignore */ }
 		console.log('[chat-labels] cost cache cleared');
+	};
+
+	// Диагностика live-capture: что мы знаем про composerId'ы новых чатов,
+	// и видит ли наш wrapper вообще запросы Cursor'а. Запусти, побеседуй
+	// 10–20 секунд, запусти ещё раз — должно расти.
+	window.__cursorChatLabelsInspectCost = function() {
+		const rt = loadRuntimeComposers();
+		const auth = loadCostAuth();
+		console.group('[chat-labels] cost inspect');
+		console.log('Bearer token captured:', !!auth.token, auth.token ? '(len ' + auth.token.length + ')' : '');
+		console.log('teamId:', auth.teamId || '(none yet — open Settings → Usage)');
+		console.log('Static composers (composers.js) loaded:', composersByName ? composersByName.size : 'NO');
+		console.log('Runtime-captured composers:', Object.keys(rt).length);
+		for (const [title, info] of Object.entries(rt)) {
+			console.log('  ', title.slice(0, 60), '→', info.composerId.slice(0, 8) + '…');
+		}
+		console.log('Recent clicks (titles in last ' + (COST_RECENT_CLICK_TTL_MS/1000) + 's):', recentClicks.map(c => c.title));
+		console.log('window.fetch hooked:', window.fetch === _ourFetch);
+		console.log('XHR.send hooked:', XMLHttpRequest.prototype.send !== _origXhrSend);
+		console.groupEnd();
+		return { rt, auth, recentClicks };
 	};
 
 	window.__cursorChatLabelsClearRuntimeComposers = function() {
