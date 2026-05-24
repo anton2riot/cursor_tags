@@ -27,9 +27,23 @@
 .cl-badge { display: inline-flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1; flex-shrink: 0; }
 .cl-badge-pin { width: 14px; height: 14px; }
 
-/* Левая цветная полоска. !important — потому что Cursor на active/focused
-   state может выставлять свой box-shadow, перебивая наш. */
-.cl-has-label { box-shadow: inset 3px 0 0 0 var(--cl-color, transparent) !important; border-radius: 4px; }
+/* Левая цветная полоска через ::before pseudo-element.
+   Раньше использовался box-shadow, но Cursor на focus/contextmenu выставляет
+   свой box-shadow inline (inline побеждает stylesheet !important), и полоска
+   пропадала. Pseudo-element не конфликтует с box-shadow вообще. */
+.cl-has-label { position: relative; }
+.cl-has-label::before {
+	content: '';
+	position: absolute;
+	left: 0;
+	top: 2px;
+	bottom: 2px;
+	width: 3px;
+	background: var(--cl-color, transparent);
+	border-radius: 2px;
+	pointer-events: none;
+	z-index: 1;
+}
 
 /* Контекстное меню */
 .cl-menu { position: fixed; z-index: 999999; min-width: 200px; background: var(--vscode-menu-background, #2d2d2d); color: var(--vscode-menu-foreground, #f0f0f0); border: 1px solid var(--vscode-menu-border, rgba(255,255,255,0.1)); border-radius: 4px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); padding: 4px 0; font-size: 12px; font-family: var(--vscode-font-family, -apple-system, sans-serif); user-select: none; }
@@ -51,6 +65,7 @@
 .cl-tagged-group.cl-collapsed .codicon-chevron-down { transform: rotate(-90deg); transition: transform 0.12s; }
 .cl-tagged-group.cl-collapsed > .ui-sidebar-group-content { display: none; }
 .cl-tagged-count { margin-left: 6px; opacity: 0.55; font-size: 11px; font-weight: 400; }
+.cl-tagged-count:empty { display: none; }
 .cl-tagged-item.cl-active-chat .glass-sidebar-agent-menu-btn { background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.25)) !important; }
 `;
 
@@ -290,6 +305,26 @@
 		// Убираем action-кнопки Pinned (Add chat / Pin all / …) — они не относятся к Tagged
 		// и могли бы случайно сработать через делегацию click на parent.
 		cloned.querySelectorAll('button, [role="button"]').forEach(b => b.remove());
+		// После удаления кнопок могут остаться пустые wrapper-divs (spacer / actions-area),
+		// которые держат «лишние пробелы» перед нативным chevron'ом. Удаляем рекурсивно.
+		const isKeeper = (el) => {
+			const cls = ((el.className || '') + '').toLowerCase();
+			if (/chevron|caret|codicon/.test(cls)) return true;
+			if (cls.includes('group-label-title') || cls.includes('label-row-title')) return true;
+			return false;
+		};
+		let removedAny = true;
+		while (removedAny) {
+			removedAny = false;
+			for (const el of Array.from(cloned.querySelectorAll('*'))) {
+				if (!el.isConnected) continue;
+				if (isKeeper(el)) continue;
+				if (el.children.length === 0 && (el.textContent || '').trim() === '') {
+					el.remove();
+					removedAny = true;
+				}
+			}
+		}
 		// Меняем текст "Pinned" → "Tagged"
 		let titleReplaced = false;
 		const allText = cloned.querySelectorAll('*');
@@ -468,6 +503,15 @@
 			if (badge) badge.title = label.title;
 			const labelEl = item.querySelector('.ui-sidebar-menu-button-label');
 			if (labelEl && labelEl.textContent !== key) labelEl.textContent = key;
+
+			// Цветная полоска для клона — через тот же класс/CSS variable, что у оригиналов.
+			const cloneBtn = item.querySelector('.cl-tagged-btn');
+			if (cloneBtn) {
+				if (!cloneBtn.classList.contains('cl-has-label')) cloneBtn.classList.add('cl-has-label');
+				if (cloneBtn.style.getPropertyValue('--cl-color') !== label.color) {
+					cloneBtn.style.setProperty('--cl-color', label.color);
+				}
+			}
 
 			const isActive = isRowActive(row);
 			if (item.classList.contains('cl-active-chat') !== isActive) item.classList.toggle('cl-active-chat', isActive);
