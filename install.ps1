@@ -37,6 +37,36 @@ if (-not (Test-Path $targetPatchDir)) {
 Copy-Item -Path (Join-Path $patchDir '*') -Destination $targetPatchDir -Recurse -Force
 Write-Host "[cursor_tags] Patch files copied to $targetPatchDir"
 
+# 2b. Export composer headers (composerId <-> name map) for the cost feature.
+# Uses Cursor's bundled node + @vscode/sqlite3 to read state.vscdb.
+try {
+    # workbench.html is at ...\resources\app\out\vs\code\electron-sandbox\workbench
+    # Walk up to find resources\app
+    $cursorAppDir = $workbenchDir
+    while ($cursorAppDir -and ((Split-Path $cursorAppDir -Leaf) -ne 'app')) {
+        $parent = Split-Path $cursorAppDir -Parent
+        if ($parent -eq $cursorAppDir) { $cursorAppDir = $null; break }
+        $cursorAppDir = $parent
+    }
+    $cursorNode = if ($cursorAppDir) { Join-Path $cursorAppDir 'resources\helpers\node.exe' } else { $null }
+    $cursorNodeModules = if ($cursorAppDir) { Join-Path $cursorAppDir 'node_modules' } else { $null }
+    $stateDb = Join-Path $env:APPDATA 'Cursor\User\globalStorage\state.vscdb'
+
+    $extractScript = Join-Path $scriptDir 'extract-composers.cjs'
+    if ($cursorNode -and (Test-Path $cursorNode) -and (Test-Path $cursorNodeModules) -and (Test-Path $stateDb) -and (Test-Path $extractScript)) {
+        $outFile = Join-Path $targetPatchDir 'composers.js'
+        $env:NODE_PATH = $cursorNodeModules
+        & $cursorNode $extractScript $stateDb $outFile 2>&1 | ForEach-Object { Write-Host "[cursor_tags] $_" }
+        if (Test-Path $outFile) {
+            Write-Host "[cursor_tags] composers.js written to $outFile" -ForegroundColor Cyan
+        }
+    } else {
+        Write-Host "[cursor_tags] warn: cannot export composers (node/sqlite/state.vscdb/extract-composers.js missing) - cost feature will be limited" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "[cursor_tags] warn: composers export failed: $_" -ForegroundColor Yellow
+}
+
 # 3. Idempotent <script> injection into workbench.html
 $workbenchHtml = Join-Path $workbenchDir 'workbench.html'
 $content = [System.IO.File]::ReadAllText($workbenchHtml, [System.Text.UTF8Encoding]::new($false))

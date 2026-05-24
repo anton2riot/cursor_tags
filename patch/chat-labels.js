@@ -19,9 +19,11 @@
 	'use strict';
 
 	const CSS = `
-/* Прячем нативную точку и pin-кнопку, когда у чата есть наш ярлык */
-.cl-has-label .ui-sidebar-menu-button-status-icon,
-.cl-has-label .ui-sidebar-menu-button-pin-button { display: none !important; }
+/* Прячем нативную точку и pin-кнопку только когда показываем СВОЙ бейдж.
+   Когда чат "думает" — у Cursor свой spinner/анимация в status-icon, мы
+   её НЕ скрываем (оставляем нативную), и cl-hide-status НЕ ставится. */
+.cl-hide-status .ui-sidebar-menu-button-status-icon,
+.cl-hide-status .ui-sidebar-menu-button-pin-button { display: none !important; }
 
 /* Наш бейдж в слоте иконки */
 .cl-badge { display: inline-flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1; flex-shrink: 0; }
@@ -76,6 +78,12 @@
 .cl-tagged-count { margin-left: 6px; opacity: 0.55; font-size: 11px; font-weight: 400; }
 .cl-tagged-count:empty { display: none; }
 .cl-tagged-item.cl-active-chat .glass-sidebar-agent-menu-btn { background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.25)) !important; }
+
+/* Cost item в контекстном меню — не закрывает меню на клик, можно ткнуть для refresh */
+.cl-cost-item { cursor: default; }
+.cl-cost-item.cl-cost-clickable { cursor: pointer; }
+.cl-cost-text-secondary { opacity: 0.55; font-size: 11px; margin-left: 4px; }
+.cl-cost-error { color: var(--vscode-errorForeground, #f48771); }
 `;
 
 	if (window.__cursorChatLabelsCleanup) {
@@ -89,6 +97,12 @@
 
 	const STORAGE_KEY = 'cursor-chat-labels-v1';
 	const COLLAPSED_KEY = 'cursor-chat-labels-tagged-collapsed';
+	const COST_CACHE_KEY = 'cursor-chat-labels-cost-cache-v1';
+	const COST_AUTH_KEY = 'cursor-chat-labels-cost-auth-v1';
+	const COST_RUNTIME_COMPOSERS_KEY = 'cursor-chat-labels-runtime-composers-v1';
+	const COST_CACHE_TTL_MS = 10 * 60 * 1000;
+	const COST_RECENT_CLICK_TTL_MS = 8000;
+	const COST_API_URL = 'https://api2.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents';
 
 	const DEFAULT_LABELS = [
 		{ id: 'important', title: 'ВАЖНО',     color: '#ffb02e', icon: '⚠️' },
@@ -218,7 +232,42 @@
 		return false;
 	}
 
+	// Defensive: "думает" ли чат прямо сейчас. Маркеры в Cursor для thinking
+	// точно не известны (через __cursorChatLabelsInspect видели только
+	// agent-status-dot--done-seen и --done-unseen). Ловим всё, что похоже
+	// на in-progress: модификаторы класса, aria-busy, spinner-элементы.
+	const THINKING_RE = /think|progress|streaming|working|loading|busy|pending|running|generating|in-progress|in_progress/i;
+	function isRowThinking(row) {
+		const btn = findFirst(row, SELECTORS.rowButton);
+		for (const el of [row, btn]) {
+			if (!el) continue;
+			if (el.getAttribute && el.getAttribute('aria-busy') === 'true') return true;
+			if (THINKING_RE.test((el.className || '') + '')) return true;
+		}
+		const dot = row.querySelector('.agent-status-dot');
+		if (dot) {
+			const cls = (dot.className || '') + '';
+			const aria = dot.getAttribute('aria-label') || '';
+			if (THINKING_RE.test(cls) || THINKING_RE.test(aria)) return true;
+		}
+		const wrapper = findPinSlot(row);
+		if (wrapper) {
+			// Любой явный spinner/loader/анимация в слоте иконки = думает.
+			if (wrapper.querySelector('[class*="spinner" i], [class*="loader" i], [class*="loading" i], [class*="working" i], [class*="thinking" i], [class*="progress" i], [class*="streaming" i]')) {
+				return true;
+			}
+			// SVG с animate/animation атрибутом — тоже признак анимации (рендерим её "как есть").
+			const svg = wrapper.querySelector('svg');
+			if (svg && (svg.querySelector('animate, animateTransform') || /(?:^|\s)(?:cursor-spinner|animate-spin)(?:\s|$)/i.test((svg.className.baseVal || svg.className || '') + ''))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	// Идемпотентный apply: наш бейдж в слоте иконки нативной точки.
+	// Когда чат "думает" — наш бейдж убираем, нативную анимацию НЕ скрываем
+	// (cl-hide-status снимаем), но cl-has-label оставляем — полоска видна.
 	function applyBadge(row, labels) {
 		const key = getChatKey(row);
 		if (!key) return;
@@ -228,20 +277,35 @@
 		const labelId = labels[key];
 		const label = LABELS.find(l => l.id === labelId);
 		const hasLabel = label && label.id !== 'none';
+		const thinking = hasLabel ? isRowThinking(row) : false;
+		const showOurBadge = hasLabel && !thinking;
 
 		if (!hasLabel) {
 			row.querySelectorAll('.cl-badge').forEach(el => el.remove());
 			if (btn.classList.contains('cl-has-label')) btn.classList.remove('cl-has-label');
+			if (btn.classList.contains('cl-hide-status')) btn.classList.remove('cl-hide-status');
 			if (btn.style.getPropertyValue('--cl-color')) btn.style.removeProperty('--cl-color');
 			return;
 		}
 
+		// Полоска (cl-has-label) показывается всегда при наличии ярлыка — даже когда думает.
 		if (!btn.classList.contains('cl-has-label')) btn.classList.add('cl-has-label');
 		if (btn.style.getPropertyValue('--cl-color') !== label.color) {
 			btn.style.setProperty('--cl-color', label.color);
 		}
 
-		// Если слот иконки найден — наш бейдж туда. Если нет — fallback на label.
+		// Скрытие нативной точки/пина — только когда показываем СВОЙ бейдж.
+		const wantHide = showOurBadge;
+		if (btn.classList.contains('cl-hide-status') !== wantHide) {
+			btn.classList.toggle('cl-hide-status', wantHide);
+		}
+
+		// Бейдж в слоте — только если не думает. Иначе убираем, Cursor сам рисует анимацию.
+		if (!showOurBadge) {
+			row.querySelectorAll('.cl-badge').forEach(el => el.remove());
+			return;
+		}
+
 		if (slot) {
 			let badge = slot.querySelector(':scope > .cl-badge-pin');
 			if (!badge) {
@@ -251,7 +315,6 @@
 			}
 			if (badge.textContent !== label.icon) badge.textContent = label.icon;
 			if (badge.title !== label.title) badge.title = label.title;
-			// Подчистим возможный fallback-бейдж из label-слота
 			const labelEl = findFirst(row, SELECTORS.rowTitle);
 			if (labelEl) {
 				const inLabel = labelEl.querySelector(':scope > .cl-badge:not(.cl-badge-pin)');
@@ -260,7 +323,6 @@
 			return;
 		}
 
-		// Fallback (если разметка Cursor другая)
 		const labelEl = findFirst(row, SELECTORS.rowTitle);
 		if (!labelEl) return;
 		const existing = labelEl.querySelector(':scope > .cl-badge');
@@ -611,6 +673,272 @@
 		}
 	});
 
+	// ---- Стоимость чата ------------------------------------------------------
+	// composers.json генерируется install.ps1'ом из state.vscdb (composer.composerHeaders).
+	// Карта: name -> [composer, ...] отсортировано по lastUpdatedAt desc, чтобы для
+	// дублирующихся имён брать самый свежий чат (так чаще выберется тот, что
+	// сейчас в сайдбаре).
+	let composersByName = null;     // Map<string, Array<{composerId,name,lastUpdatedAt,createdAt}>>
+	let composersSyncedAt = 0;
+
+	async function loadComposers() {
+		try {
+			const url = new URL('./composers.js', import.meta.url).href;
+			const mod = await import(url);
+			const list = Array.isArray(mod.composers) ? mod.composers : [];
+			const map = new Map();
+			for (const c of list) {
+				if (!c || !c.composerId) continue;
+				const name = (c.name || '').trim();
+				if (!name) continue;
+				if (!map.has(name)) map.set(name, []);
+				map.get(name).push(c);
+			}
+			for (const arr of map.values()) {
+				arr.sort((a, b) => (b.lastUpdatedAt || 0) - (a.lastUpdatedAt || 0));
+			}
+			composersByName = map;
+			composersSyncedAt = mod.syncedAt || 0;
+			console.log('[chat-labels] composers loaded:', list.length, 'syncedAt:', new Date(composersSyncedAt).toLocaleString());
+		} catch (err) {
+			composersByName = null;
+			console.warn('[chat-labels] composers.js не загрузился — кост-фичу выключаем', err);
+		}
+	}
+
+	// Runtime-captured composers: дополняем снапшот composers.js парами, которые
+	// мы успели подслушать из живых запросов Cursor'а к api2.cursor.sh. Это нужно
+	// для чатов, созданных уже после install.ps1 — для них в статическом снапшоте
+	// записи нет, но как только пользователь кликнул на чат и Cursor сходил с
+	// composerId в API, мы запоминаем title → composerId.
+	function loadRuntimeComposers() {
+		try {
+			const raw = localStorage.getItem(COST_RUNTIME_COMPOSERS_KEY);
+			return raw ? (JSON.parse(raw) || {}) : {};
+		} catch { return {}; }
+	}
+	function saveRuntimeComposers(map) {
+		try { localStorage.setItem(COST_RUNTIME_COMPOSERS_KEY, JSON.stringify(map)); }
+		catch { /* ignore */ }
+	}
+
+	function findComposersForKey(key) {
+		if (!key) return [];
+		const out = [];
+		const seen = new Set();
+		const rt = loadRuntimeComposers();
+		const rtEntry = rt[key];
+		if (rtEntry && rtEntry.composerId) {
+			out.push({
+				composerId: rtEntry.composerId,
+				name: key,
+				lastUpdatedAt: rtEntry.capturedAt || 0,
+				createdAt: 0,
+				source: 'runtime'
+			});
+			seen.add(rtEntry.composerId);
+		}
+		if (composersByName) {
+			for (const c of (composersByName.get(key) || [])) {
+				if (seen.has(c.composerId)) continue;
+				out.push({ ...c, source: 'static' });
+				seen.add(c.composerId);
+			}
+		}
+		return out;
+	}
+
+	// Click-tracker для live capture: помним последние клики по чатам в сайдбаре.
+	// Когда fetch к api2.cursor.sh уходит с composerId/cloudAgentId в теле — пара
+	// «свежий клик → composerId» сохраняется в runtime map.
+	let recentClicks = []; // [{ title, at }]
+	function rememberClickedTitle(title) {
+		if (!title) return;
+		const now = Date.now();
+		recentClicks.push({ title, at: now });
+		// Подрезаем устаревшее, плюс держим максимум 12 чтоб не разрастаться.
+		recentClicks = recentClicks.filter(c => now - c.at < COST_RECENT_CLICK_TTL_MS).slice(-12);
+	}
+	function captureComposerFromFetch(composerId) {
+		if (!composerId || typeof composerId !== 'string' || composerId.length < 30) return;
+		const now = Date.now();
+		// Берём самый свежий клик, который ещё не «вышел». Если в окне восемь
+		// секунд было два клика, второй вероятнее — он перезапишет первый.
+		let best = null;
+		for (let i = recentClicks.length - 1; i >= 0; i--) {
+			if (now - recentClicks[i].at < COST_RECENT_CLICK_TTL_MS) { best = recentClicks[i]; break; }
+		}
+		if (!best) return;
+		const rt = loadRuntimeComposers();
+		if (rt[best.title] && rt[best.title].composerId === composerId) return;
+		rt[best.title] = { composerId, capturedAt: now };
+		saveRuntimeComposers(rt);
+		console.log('[chat-labels] live-captured composerId', composerId.slice(0, 8) + '…', '→', best.title);
+	}
+
+	const _clickTracker = (ev) => {
+		const t = ev.target;
+		if (!(t instanceof Element)) return;
+		const row = t.closest('li.ui-sidebar-menu-item');
+		if (!row) return;
+		if (row.closest('.cl-tagged-group')) {
+			// клон в Tagged — берём имя оригинала
+			const key = row.dataset.clKey;
+			if (key) rememberClickedTitle(key);
+			return;
+		}
+		rememberClickedTitle(getChatKey(row));
+	};
+	document.addEventListener('click', _clickTracker, true);
+	document.addEventListener('mousedown', _clickTracker, true);
+
+	// Перехватываем fetch к api2.cursor.sh — Cursor сам ходит туда регулярно (usage,
+	// dashboard, autocomplete telemetry). На лету учим:
+	//  - Bearer-токен (из Authorization header)
+	//  - teamId (из тела запроса, если оно JSON)
+	// Сохраняем в localStorage чтобы пережить рестарт renderer'а.
+	function loadCostAuth() {
+		try {
+			const raw = localStorage.getItem(COST_AUTH_KEY);
+			return raw ? (JSON.parse(raw) || {}) : {};
+		} catch { return {}; }
+	}
+	function saveCostAuth(patch) {
+		try {
+			const cur = loadCostAuth();
+			const next = { ...cur, ...patch };
+			localStorage.setItem(COST_AUTH_KEY, JSON.stringify(next));
+		} catch { /* ignore */ }
+	}
+
+	const _origFetch = window.fetch.bind(window);
+	function isCursorApiUrl(u) {
+		return typeof u === 'string' && u.includes('api2.cursor.sh');
+	}
+	const _ourFetch = function(input, init) {
+		try {
+			let url = '';
+			let reqHeaders = null;
+			if (typeof input === 'string') url = input;
+			else if (input && typeof input.url === 'string') { url = input.url; reqHeaders = input.headers; }
+			if (isCursorApiUrl(url)) {
+				let auth = null;
+				if (init && init.headers) {
+					const h = init.headers instanceof Headers ? init.headers : new Headers(init.headers);
+					auth = h.get('authorization');
+				} else if (reqHeaders && typeof reqHeaders.get === 'function') {
+					auth = reqHeaders.get('authorization');
+				}
+				if (auth && /^Bearer\s+/i.test(auth)) {
+					const stored = loadCostAuth();
+					if (stored.token !== auth) saveCostAuth({ token: auth });
+				}
+				const body = init && init.body;
+				if (typeof body === 'string' && body.length > 0 && body.charCodeAt(0) === 0x7b /* { */) {
+					try {
+						const parsed = JSON.parse(body);
+						if (parsed && typeof parsed.teamId === 'number' && parsed.teamId > 0) {
+							const stored = loadCostAuth();
+							if (stored.teamId !== parsed.teamId) saveCostAuth({ teamId: parsed.teamId });
+						}
+						// Live capture: composerId/cloudAgentId/bubbleId.composerId — что найдём.
+						// При походе по api2.cursor.sh после click на чате — связываем
+						// title последнего кликнутого ряда с этим composerId.
+						const cid = (parsed && (parsed.composerId || parsed.cloudAgentId)) ||
+							(parsed && parsed.bubbleId && parsed.bubbleId.composerId) || null;
+						if (cid) captureComposerFromFetch(cid);
+					} catch { /* not json or not interesting */ }
+				}
+			}
+		} catch (err) { /* never break fetch */ }
+		return _origFetch(input, init);
+	};
+	window.fetch = _ourFetch;
+
+	function loadCostCache() {
+		try { return JSON.parse(localStorage.getItem(COST_CACHE_KEY) || '{}') || {}; }
+		catch { return {}; }
+	}
+	function saveCostCache(cache) {
+		try { localStorage.setItem(COST_CACHE_KEY, JSON.stringify(cache)); }
+		catch { /* ignore quota errors */ }
+	}
+
+	async function fetchChatCost(composerId, { force = false } = {}) {
+		const cache = loadCostCache();
+		const cached = cache[composerId];
+		if (!force && cached && (Date.now() - cached.at) < COST_CACHE_TTL_MS) {
+			return { ...cached.data, fromCache: true, cachedAt: cached.at };
+		}
+		const auth = loadCostAuth();
+		if (!auth.token) throw new Error('нет токена — открой любой чат и попробуй снова');
+		if (!auth.teamId) throw new Error('нет teamId — открой Cursor → Settings → Usage и попробуй снова');
+
+		let totalCents = 0, chargedCents = 0, tokenCents = 0, eventCount = 0;
+		const pageSize = 100;
+		const maxPages = 20; // safety: до 2000 событий на чат
+		for (let page = 1; page <= maxPages; page++) {
+			const res = await _origFetch(COST_API_URL, {
+				method: 'POST',
+				headers: {
+					'Authorization': auth.token,
+					'Connect-Protocol-Version': '1',
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({
+					teamId: auth.teamId,
+					startDate: 0,
+					endDate: Date.now(),
+					cloudAgentId: composerId,
+					page,
+					pageSize
+				})
+			});
+			if (!res.ok) {
+				const txt = await res.text().catch(() => '');
+				if (res.status === 401 || res.status === 403) {
+					// токен протух — стираем, чтоб следующий перехват его обновил
+					saveCostAuth({ token: null });
+					throw new Error(`API ${res.status} (токен устарел?)`);
+				}
+				throw new Error(`API ${res.status}${txt ? ': ' + txt.slice(0, 120) : ''}`);
+			}
+			const data = await res.json().catch(() => ({}));
+			const events = Array.isArray(data.usageEventsDisplay) ? data.usageEventsDisplay : [];
+			if (events.length === 0) break;
+			for (const ev of events) {
+				const c = Number(ev.chargedCents) || 0;
+				const t = Number(ev.tokenUsage && ev.tokenUsage.totalCents) || 0;
+				chargedCents += c;
+				tokenCents += t;
+				totalCents += Math.max(c, t);
+				eventCount++;
+			}
+			if (events.length < pageSize) break;
+		}
+		const result = { totalCents, chargedCents, tokenCents, eventCount };
+		const next = loadCostCache();
+		next[composerId] = { data: result, at: Date.now() };
+		saveCostCache(next);
+		return { ...result, fromCache: false };
+	}
+
+	function fmtCents(cents) {
+		if (!cents) return '$0.00';
+		return '$' + (cents / 100).toFixed(2);
+	}
+
+	function fmtCostLine(data) {
+		const main = fmtCents(data.totalCents);
+		let suffix = ` (${data.eventCount} событий)`;
+		// Если chargedCents сильно меньше totalCents — это "included" usage.
+		// Показываем оба, чтобы не путать с billing dashboard.
+		if (data.chargedCents !== data.totalCents && data.eventCount > 0) {
+			suffix += `, charged ${fmtCents(data.chargedCents)}`;
+		}
+		return main + suffix;
+	}
+
 	// ---- Контекстное меню ----------------------------------------------------
 	function showMenu(row, x, y) {
 		document.querySelectorAll('.cl-menu').forEach(m => m.remove());
@@ -678,6 +1006,72 @@
 				requestAnimationFrame(runDecorateNow);
 			});
 			menu.appendChild(item);
+		}
+
+		// Cost item — внизу меню. Не закрывает меню при клике (можно ткнуть для refresh).
+		{
+			const sepCost = document.createElement('div');
+			sepCost.className = 'cl-menu-sep';
+			menu.appendChild(sepCost);
+
+			const costItem = document.createElement('div');
+			costItem.className = 'cl-menu-item cl-cost-item';
+			const costIcon = document.createElement('span');
+			costIcon.className = 'cl-menu-icon';
+			costIcon.textContent = '💰';
+			costItem.appendChild(costIcon);
+			const costText = document.createElement('span');
+			costText.className = 'cl-cost-text';
+			costItem.appendChild(costText);
+
+			// Состояния выводятся в costText. costItem.title — для подробностей в tooltip.
+			const candidates = findComposersForKey(key);
+			const suffix = candidates.length > 1 ? ` · ${candidates.length} чатов с этим именем` : '';
+
+			const renderCost = (data, opts = {}) => {
+				costText.textContent = fmtCostLine(data) + suffix + (opts.stale ? ' · кэш' : '');
+				costText.classList.remove('cl-cost-error');
+				const composerId = opts.composerId;
+				const tip = [
+					'charged: ' + fmtCents(data.chargedCents),
+					'token cost: ' + fmtCents(data.tokenCents),
+					'events: ' + data.eventCount,
+					composerId ? 'composerId: ' + composerId : null
+				].filter(Boolean).join('\n');
+				costItem.title = tip;
+			};
+			const renderError = (msg) => {
+				costText.textContent = 'Стоимость: ' + msg;
+				costText.classList.add('cl-cost-error');
+			};
+
+			if (!composersByName) {
+				renderError('composers.js не загружен — перезапусти install.ps1');
+			} else if (candidates.length === 0) {
+				renderError('composerId не известен — открой этот чат и сделай в нём любой запрос, потом снова ткни ПКМ');
+			} else {
+				const primary = candidates[0];
+				costItem.classList.add('cl-cost-clickable');
+				costText.textContent = 'Стоимость: загрузка…';
+				let inFlight = false;
+				const run = (force) => {
+					if (inFlight) return;
+					inFlight = true;
+					costText.textContent = 'Стоимость: ' + (force ? 'обновление…' : 'загрузка…');
+					costText.classList.remove('cl-cost-error');
+					fetchChatCost(primary.composerId, { force }).then(data => {
+						renderCost(data, { composerId: primary.composerId, stale: false });
+					}).catch(err => {
+						renderError(err.message || String(err));
+					}).finally(() => { inFlight = false; });
+				};
+				costItem.addEventListener('click', (ev) => {
+					ev.stopPropagation();
+					run(true);
+				});
+				run(false);
+			}
+			menu.appendChild(costItem);
 		}
 
 		document.body.appendChild(menu);
@@ -750,19 +1144,25 @@
 	}
 
 	(async () => {
-		await loadConfig();
+		await Promise.all([loadConfig(), loadComposers()]);
 		observer.observe(document.body, { childList: true, subtree: true });
 		runDecorateNow();
 		const initialCount = findAll(document, SELECTORS.row).length;
-		console.log('%c[chat-labels v7] booted', 'color: #27ae60; font-weight: bold', { rowsDecorated: initialCount, labels: userLabels.length });
+		console.log('%c[chat-labels v8] booted', 'color: #27ae60; font-weight: bold', {
+			rowsDecorated: initialCount,
+			labels: userLabels.length,
+			composers: composersByName ? composersByName.size : 0,
+			cost: { hasToken: !!loadCostAuth().token, hasTeamId: !!loadCostAuth().teamId }
+		});
 	})();
 
 	// ---- Public helpers ------------------------------------------------------
 	window.__cursorChatLabelsReloadConfig = async function() {
 		const ok = await loadConfig({ bust: true });
 		document.querySelectorAll('.cl-badge').forEach(el => el.remove());
-		document.querySelectorAll('.cl-has-label').forEach(el => {
+		document.querySelectorAll('.cl-has-label, .cl-hide-status').forEach(el => {
 			el.classList.remove('cl-has-label');
+			el.classList.remove('cl-hide-status');
 			el.style.removeProperty('--cl-color');
 		});
 		runDecorateNow();
@@ -773,9 +1173,17 @@
 		observerDisabled = true;
 		observer.disconnect();
 		document.removeEventListener('contextmenu', contextMenuHandler, true);
+		document.removeEventListener('click', _clickTracker, true);
+		document.removeEventListener('mousedown', _clickTracker, true);
+		// Снимаем подмену fetch ТОЛЬКО если наш wrapper всё ещё активен —
+		// иначе можем затереть чужой wrapper, который пришёл после нас.
+		if (window.fetch === _ourFetch) {
+			try { window.fetch = _origFetch; } catch { /* readonly? */ }
+		}
 		document.querySelectorAll('.cl-badge, .cl-menu, .cl-tagged-group, #cursor-chat-labels-style').forEach(el => el.remove());
-		document.querySelectorAll('.cl-has-label').forEach(el => {
+		document.querySelectorAll('.cl-has-label, .cl-hide-status').forEach(el => {
 			el.classList.remove('cl-has-label');
+			el.classList.remove('cl-hide-status');
 			el.style.removeProperty('--cl-color');
 		});
 		document.querySelectorAll('.cl-status-seen, .cl-status-unseen').forEach(el => {
@@ -791,9 +1199,26 @@
 		console.log('Rows found:', findAll(document, SELECTORS.row).length);
 		console.log('Stored labels:', loadStoredLabels());
 		console.log('Active label set:', LABELS);
+		console.log('Composers loaded:', composersByName ? composersByName.size : 0, 'unique names; syncedAt:', composersSyncedAt ? new Date(composersSyncedAt).toLocaleString() : 'n/a');
+		console.log('Runtime composers:', Object.keys(loadRuntimeComposers()).length, 'entries');
+		console.log('Recent clicks (last 8s):', recentClicks.filter(c => Date.now() - c.at < COST_RECENT_CLICK_TTL_MS));
+		console.log('Cost auth:', { hasToken: !!loadCostAuth().token, teamId: loadCostAuth().teamId || null });
+		console.log('Cost cache entries:', Object.keys(loadCostCache()).length);
 		console.log('Suppressing:', suppressing, '| FiredThisFrame:', firedThisFrame, '| Disabled:', observerDisabled);
 		console.log('Observer errors:', observerErrors);
 		console.groupEnd();
+	};
+
+	window.__cursorChatLabelsClearCostCache = function() {
+		try { localStorage.removeItem(COST_CACHE_KEY); }
+		catch { /* ignore */ }
+		console.log('[chat-labels] cost cache cleared');
+	};
+
+	window.__cursorChatLabelsClearRuntimeComposers = function() {
+		try { localStorage.removeItem(COST_RUNTIME_COMPOSERS_KEY); }
+		catch { /* ignore */ }
+		console.log('[chat-labels] runtime composers cleared');
 	};
 
 	// Дампит computed CSS заголовков и items группы Pinned (или Workspaces),
