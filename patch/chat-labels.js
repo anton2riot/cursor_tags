@@ -587,6 +587,7 @@
 				const wantUnseen = status === 'unseen';
 				if (cloneBtn.classList.contains('cl-status-seen') !== wantSeen) cloneBtn.classList.toggle('cl-status-seen', wantSeen);
 				if (cloneBtn.classList.contains('cl-status-unseen') !== wantUnseen) cloneBtn.classList.toggle('cl-status-unseen', wantUnseen);
+				setLabelColor(cloneBtn.querySelector('.ui-sidebar-menu-button-label'), wantUnseen ? UNSEEN_COLOR : null);
 			}
 
 			const isActive = isRowActive(row);
@@ -618,16 +619,34 @@
 		return null;
 	}
 
+	const UNSEEN_COLOR = '#2371a8';
+
+	// Применяет цвет label через inline-style !important — это побеждает любой
+	// CSS-in-JS Cursor'а (stylesheet даже с !important проигрывает inline !important).
+	// Идемпотентно: проверяем текущее значение/priority перед записью.
+	function setLabelColor(labelEl, color) {
+		if (!labelEl) return;
+		const cur = labelEl.style.getPropertyValue('color');
+		const prio = labelEl.style.getPropertyPriority('color');
+		if (color) {
+			if (cur !== color || prio !== 'important') {
+				labelEl.style.setProperty('color', color, 'important');
+			}
+		} else if (cur) {
+			labelEl.style.removeProperty('color');
+		}
+	}
+
 	function applyStatus(row) {
 		const btn = findFirst(row, SELECTORS.rowButton);
 		if (!btn) return null;
+		const labelEl = findFirst(row, SELECTORS.rowTitle);
 		const state = getRowStatus(row);
 		const wantSeen = state === 'seen';
 		const wantUnseen = state === 'unseen';
-		// classList.toggle с условием не вызывает мутацию, если состояние совпадает —
-		// observer-loop не запускается.
 		if (btn.classList.contains('cl-status-seen') !== wantSeen) btn.classList.toggle('cl-status-seen', wantSeen);
 		if (btn.classList.contains('cl-status-unseen') !== wantUnseen) btn.classList.toggle('cl-status-unseen', wantUnseen);
+		setLabelColor(labelEl, wantUnseen ? UNSEEN_COLOR : null);
 		return state;
 	}
 
@@ -680,6 +699,7 @@
 	// сейчас в сайдбаре).
 	let composersByName = null;     // Map<string, Array<{composerId,name,lastUpdatedAt,createdAt}>>
 	let composersSyncedAt = 0;
+	let composersSeedTeamId = null; // teamId, вытащенный install'ом из state.vscdb
 
 	async function loadComposers() {
 		try {
@@ -699,7 +719,15 @@
 			}
 			composersByName = map;
 			composersSyncedAt = mod.syncedAt || 0;
-			console.log('[chat-labels] composers loaded:', list.length, 'syncedAt:', new Date(composersSyncedAt).toLocaleString());
+			composersSeedTeamId = (typeof mod.teamId === 'number' && mod.teamId > 0) ? mod.teamId : null;
+			// Если интерсептор ещё не успел поймать teamId — кладём из снапшота.
+			// Это устраняет «нет teamId, открой Settings…» сразу после установки.
+			if (composersSeedTeamId && !loadCostAuth().teamId) {
+				saveCostAuth({ teamId: composersSeedTeamId });
+			}
+			console.log('[chat-labels] composers loaded:', list.length,
+				'teamId:', composersSeedTeamId,
+				'syncedAt:', composersSyncedAt ? new Date(composersSyncedAt).toLocaleString() : 'n/a');
 		} catch (err) {
 			composersByName = null;
 			console.warn('[chat-labels] composers.js не загрузился — кост-фичу выключаем', err);
@@ -872,7 +900,7 @@
 		}
 		const auth = loadCostAuth();
 		if (!auth.token) throw new Error('нет токена — открой любой чат и попробуй снова');
-		if (!auth.teamId) throw new Error('нет teamId — открой Cursor → Settings → Usage и попробуй снова');
+		if (!auth.teamId) throw new Error('нет teamId — перезапусти install.ps1 (composers.js без teamId)');
 
 		let totalCents = 0, chargedCents = 0, tokenCents = 0, eventCount = 0;
 		const pageSize = 100;
@@ -1189,6 +1217,8 @@
 		document.querySelectorAll('.cl-status-seen, .cl-status-unseen').forEach(el => {
 			el.classList.remove('cl-status-seen');
 			el.classList.remove('cl-status-unseen');
+			const lbl = el.querySelector('.ui-sidebar-menu-button-label');
+			if (lbl) lbl.style.removeProperty('color');
 		});
 		delete window.__cursorChatLabelsCleanup;
 		console.log('[chat-labels] cleaned up');

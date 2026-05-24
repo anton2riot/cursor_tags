@@ -1,6 +1,11 @@
 // Запускается install.ps1'ом через bundled Cursor node.exe.
-// Читает composer.composerHeaders из state.vscdb и пишет composers.js (ES module)
-// в директорию пэтча. Используется кост-фичей в chat-labels.js.
+// Читает state.vscdb и пишет composers.js (ES module) в директорию пэтча.
+// Используется кост-фичей в chat-labels.js.
+//
+// Что забираем:
+//   - composer.composerHeaders → массив {composerId, name, lastUpdatedAt, createdAt}
+//   - applicationUser.aiSettings.teamIds[0] → teamId (нужен в body API запроса)
+//   - applicationUser.membershipType / isEnterprise → для дебага и информативного сообщения
 //
 // @vscode/sqlite3 — нативный модуль из bundle Cursor'а. Резолвим его путь
 // относительно node.exe Cursor'а, чтобы не полагаться на NODE_PATH
@@ -17,36 +22,73 @@ const dbPath = process.argv[2];
 const outPath = process.argv[3];
 
 if (!dbPath || !outPath) {
-    console.error('[composers] usage: node extract-composers.js <state.vscdb> <out.js>');
+    console.error('[composers] usage: node extract-composers.cjs <state.vscdb> <out.js>');
     process.exit(2);
 }
 
-const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (err) => {
-    if (err) { console.error('[composers] open:', err.message); process.exit(1); }
-    db.get(
-        "SELECT CAST(value AS TEXT) AS v FROM ItemTable WHERE key = 'composer.composerHeaders'",
-        (err, row) => {
-            if (err || !row) { console.error('[composers] no composer.composerHeaders row'); process.exit(1); }
-            let parsed;
-            try { parsed = JSON.parse(row.v); }
-            catch (e) { console.error('[composers] parse:', e.message); process.exit(1); }
+function getValue(db, key) {
+    return new Promise((resolve, reject) => {
+        db.get(
+            "SELECT CAST(value AS TEXT) AS v FROM ItemTable WHERE key = ?",
+            [key],
+            (err, row) => err ? reject(err) : resolve(row ? row.v : null)
+        );
+    });
+}
 
-            const list = parsed.allComposers || parsed.composers || [];
-            const trimmed = list
-                .filter(c => c && c.composerId)
-                .map(c => ({
-                    composerId: c.composerId,
-                    name: (c.name || '').trim(),
-                    lastUpdatedAt: c.lastUpdatedAt || 0,
-                    createdAt: c.createdAt || 0
-                }));
+(async () => {
+    const db = await new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (err) => err ? reject(err) : resolve(d));
+    }).catch(e => { console.error('[composers] open:', e.message); process.exit(1); });
 
-            const out =
-                'export const composers = ' + JSON.stringify(trimmed) + ';\n' +
-                'export const syncedAt = ' + Date.now() + ';\n';
-            fs.writeFileSync(outPath, out, 'utf8');
-            console.log('[composers] exported', trimmed.length, 'entries to', outPath);
-            process.exit(0);
+    // 1. composer.composerHeaders → trimmed composers
+    const rawHeaders = await getValue(db, 'composer.composerHeaders').catch(() => null);
+    if (!rawHeaders) { console.error('[composers] no composer.composerHeaders'); process.exit(1); }
+    let headers;
+    try { headers = JSON.parse(rawHeaders); }
+    catch (e) { console.error('[composers] parse headers:', e.message); process.exit(1); }
+    const list = headers.allComposers || headers.composers || [];
+    const trimmed = list
+        .filter(c => c && c.composerId)
+        .map(c => ({
+            composerId: c.composerId,
+            name: (c.name || '').trim(),
+            lastUpdatedAt: c.lastUpdatedAt || 0,
+            createdAt: c.createdAt || 0
+        }));
+
+    // 2. applicationUser → teamId, membershipType, isEnterprise, dashboardUserId
+    let teamId = null;
+    let membershipType = null;
+    let isEnterprise = null;
+    let dashboardUserId = null;
+    const rawUser = await getValue(
+        db,
+        'src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser'
+    ).catch(() => null);
+    if (rawUser) {
+        try {
+            const u = JSON.parse(rawUser);
+            const teamIds = (u.aiSettings && Array.isArray(u.aiSettings.teamIds)) ? u.aiSettings.teamIds : [];
+            if (teamIds.length > 0 && typeof teamIds[0] === 'number' && teamIds[0] > 0) {
+                teamId = teamIds[0];
+            }
+            membershipType = u.membershipType || null;
+            isEnterprise = (typeof u.isEnterprise === 'boolean') ? u.isEnterprise : null;
+            if (u.dashboardUserId) dashboardUserId = u.dashboardUserId;
+        } catch (e) {
+            console.error('[composers] parse applicationUser:', e.message);
         }
-    );
-});
+    }
+
+    const out =
+        'export const composers = ' + JSON.stringify(trimmed) + ';\n' +
+        'export const syncedAt = ' + Date.now() + ';\n' +
+        'export const teamId = ' + JSON.stringify(teamId) + ';\n' +
+        'export const membershipType = ' + JSON.stringify(membershipType) + ';\n' +
+        'export const isEnterprise = ' + JSON.stringify(isEnterprise) + ';\n' +
+        'export const dashboardUserId = ' + JSON.stringify(dashboardUserId) + ';\n';
+    fs.writeFileSync(outPath, out, 'utf8');
+    console.log('[composers] exported', trimmed.length, 'entries, teamId =', teamId, 'membershipType =', membershipType);
+    process.exit(0);
+})();
