@@ -58,9 +58,8 @@
 .cl-menu-icon { width: 14px; text-align: center; flex-shrink: 0; }
 
 /* Unread-индикация: раньше Cursor показывал точку (синюю/серую), но мы её
-   скрываем. Цвет/жирность label теперь показывают, что чат ожидает прочтения. */
-.cl-status-unseen .ui-sidebar-menu-button-label { color: var(--vscode-foreground, #fff) !important; font-weight: 600 !important; }
-.cl-status-seen .ui-sidebar-menu-button-label { color: var(--vscode-descriptionForeground, rgba(255,255,255,0.55)) !important; }
+   скрываем — переносим состояние на цвет label. */
+.cl-status-unseen .ui-sidebar-menu-button-label { color: #2371a8 !important; }
 
 /* Имена воркспейсов (Home / am_miroai / aquascapes / …) — жирным. У них
    ui-sidebar-label-row-title без ui-sidebar-group-label-title (последний
