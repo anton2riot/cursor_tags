@@ -27,8 +27,9 @@
 .cl-badge { display: inline-flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1; flex-shrink: 0; }
 .cl-badge-pin { width: 14px; height: 14px; }
 
-/* Левая цветная полоска по краю строки чата */
-.cl-has-label { box-shadow: inset 3px 0 0 0 var(--cl-color, transparent); border-radius: 4px; }
+/* Левая цветная полоска. !important — потому что Cursor на active/focused
+   state может выставлять свой box-shadow, перебивая наш. */
+.cl-has-label { box-shadow: inset 3px 0 0 0 var(--cl-color, transparent) !important; border-radius: 4px; }
 
 /* Контекстное меню */
 .cl-menu { position: fixed; z-index: 999999; min-width: 200px; background: var(--vscode-menu-background, #2d2d2d); color: var(--vscode-menu-foreground, #f0f0f0); border: 1px solid var(--vscode-menu-border, rgba(255,255,255,0.1)); border-radius: 4px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); padding: 4px 0; font-size: 12px; font-family: var(--vscode-font-family, -apple-system, sans-serif); user-select: none; }
@@ -42,13 +43,14 @@
 .cl-menu-dot-none { border: 1px solid currentColor; background: transparent !important; }
 .cl-menu-icon { width: 14px; text-align: center; flex-shrink: 0; }
 
-/* Tagged group — наследует стили от .ui-sidebar-group / .ui-sidebar-menu-item */
-.cl-tagged-header { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; padding: 6px 8px 4px; }
-.cl-tagged-header:hover .ui-sidebar-group-label-title { opacity: 1; }
-.cl-tagged-caret { display: inline-block; transition: transform 0.12s; font-size: 9px; opacity: 0.7; width: 9px; flex-shrink: 0; }
-.cl-tagged-group.cl-collapsed .cl-tagged-caret { transform: rotate(-90deg); }
+/* Tagged group — клонированный header из Pinned даёт нам typography бесплатно. */
+.cl-tagged-header { cursor: pointer; user-select: none; }
+/* Когда наша группа свёрнута, поворачиваем chevron нативного header'а */
+.cl-tagged-group.cl-collapsed [class*="chevron"],
+.cl-tagged-group.cl-collapsed [class*="caret"],
+.cl-tagged-group.cl-collapsed .codicon-chevron-down { transform: rotate(-90deg); transition: transform 0.12s; }
 .cl-tagged-group.cl-collapsed > .ui-sidebar-group-content { display: none; }
-.cl-tagged-count { margin-left: auto; opacity: 0.6; font-size: 11px; font-weight: 400; }
+.cl-tagged-count { margin-left: 6px; opacity: 0.55; font-size: 11px; font-weight: 400; }
 .cl-tagged-item.cl-active-chat .glass-sidebar-agent-menu-btn { background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.25)) !important; }
 `;
 
@@ -269,6 +271,47 @@
 		return anyGroup ? anyGroup.parentElement : null;
 	}
 
+	function buildHeaderFromPinned(pinned) {
+		// Header — первый child Pinned-группы, который НЕ group-content.
+		const headerSrc = Array.from(pinned.children).find(c => !c.classList.contains('ui-sidebar-group-content'));
+		if (!headerSrc) return null;
+		// cloneNode(true) копирует DOM, но не event listeners — Cursor сюда уже не подключится.
+		const cloned = headerSrc.cloneNode(true);
+		// Снимаем state-атрибуты Pinned (свёрнут/раскрыт, выбранный, действия).
+		const stateAttrs = ['aria-expanded', 'aria-collapsed', 'aria-selected', 'aria-pressed', 'data-state', 'data-collapsed', 'data-expanded'];
+		const purgeClasses = ['collapsed', 'expanded', 'is-collapsed', 'is-expanded', 'active', 'selected', 'is-active', 'is-selected'];
+		const purgeNode = (el) => {
+			if (!(el instanceof Element)) return;
+			for (const a of stateAttrs) el.removeAttribute(a);
+			for (const c of purgeClasses) el.classList.remove(c);
+		};
+		purgeNode(cloned);
+		cloned.querySelectorAll('*').forEach(purgeNode);
+		// Убираем action-кнопки Pinned (Add chat / Pin all / …) — они не относятся к Tagged
+		// и могли бы случайно сработать через делегацию click на parent.
+		cloned.querySelectorAll('button, [role="button"]').forEach(b => b.remove());
+		// Меняем текст "Pinned" → "Tagged"
+		let titleReplaced = false;
+		const allText = cloned.querySelectorAll('*');
+		for (const el of allText) {
+			if (el.children.length === 0 && el.textContent) {
+				const t = el.textContent.trim();
+				if (t.toLowerCase() === 'pinned') {
+					el.textContent = 'Tagged';
+					titleReplaced = true;
+				}
+			}
+		}
+		if (!titleReplaced) {
+			// fallback: добавить наш title если в шаблоне не нашлось
+			const span = document.createElement('span');
+			span.className = 'ui-sidebar-label-row-title ui-sidebar-group-label-title';
+			span.textContent = 'Tagged';
+			cloned.insertBefore(span, cloned.firstChild);
+		}
+		return cloned;
+	}
+
 	function ensureTaggedGroup() {
 		const container = findGroupsContainer();
 		if (!container) return null;
@@ -279,19 +322,28 @@
 		group.className = 'ui-sidebar-group cl-tagged-group';
 		if (isTaggedCollapsed()) group.classList.add('cl-collapsed');
 
-		const header = document.createElement('div');
-		header.className = 'cl-tagged-header';
-		const caret = document.createElement('span');
-		caret.className = 'cl-tagged-caret';
-		caret.textContent = '▼';
-		const title = document.createElement('span');
-		title.className = 'ui-sidebar-label-row-title ui-sidebar-group-label-title';
-		title.textContent = 'Tagged';
+		const pinned = findPinnedGroup();
+		let header = pinned ? buildHeaderFromPinned(pinned) : null;
+		if (!header) {
+			// Fallback — собираем сами (старый путь)
+			header = document.createElement('div');
+			const title = document.createElement('span');
+			title.className = 'ui-sidebar-label-row-title ui-sidebar-group-label-title';
+			title.textContent = 'Tagged';
+			header.appendChild(title);
+		}
+		header.classList.add('cl-tagged-header');
+
+		// Счётчик ставим после текста, перед нативным chevron'ом (если он есть).
 		const count = document.createElement('span');
 		count.className = 'cl-tagged-count';
-		header.appendChild(caret);
-		header.appendChild(title);
-		header.appendChild(count);
+		const titleSpan = header.querySelector('.ui-sidebar-group-label-title, .ui-sidebar-label-row-title');
+		if (titleSpan && titleSpan.parentElement) {
+			titleSpan.parentElement.insertBefore(count, titleSpan.nextSibling);
+		} else {
+			header.appendChild(count);
+		}
+
 		header.addEventListener('click', (ev) => {
 			ev.preventDefault();
 			ev.stopPropagation();
@@ -309,8 +361,6 @@
 		group.appendChild(header);
 		group.appendChild(content);
 
-		// Расположение: после Pinned, иначе в начало.
-		const pinned = findPinnedGroup();
 		if (pinned && pinned.parentElement === container) {
 			container.insertBefore(group, pinned.nextSibling);
 		} else {
@@ -570,12 +620,26 @@
 		if (!(target instanceof Element)) return;
 		const row = target.closest('li.ui-sidebar-menu-item');
 		if (!row) return;
-		if (row.closest('.cl-tagged-group')) return; // ПКМ на клонах в Tagged игнорируем
 		if (!row.querySelector('.glass-sidebar-agent-menu-btn')) return;
+
+		// Если ПКМ на клоне в Tagged — открыть меню для оригинального чата.
+		let actual = row;
+		if (row.closest('.cl-tagged-group')) {
+			actual = row.__clOriginalRow && row.__clOriginalRow.isConnected ? row.__clOriginalRow : null;
+			if (!actual) {
+				const key = row.dataset.clKey;
+				for (const r of findAll(document, SELECTORS.row)) {
+					if (r.closest('.cl-tagged-group')) continue;
+					if (getChatKey(r) === key) { actual = r; break; }
+				}
+			}
+			if (!actual) return;
+		}
+
 		ev.preventDefault();
 		ev.stopPropagation();
 		ev.stopImmediatePropagation();
-		showMenu(row, ev.clientX, ev.clientY);
+		showMenu(actual, ev.clientX, ev.clientY);
 	};
 	document.addEventListener('contextmenu', contextMenuHandler, true);
 
