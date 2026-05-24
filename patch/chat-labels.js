@@ -1,32 +1,36 @@
 /*
- * cursor_tags — патч Cursor: ярлыки + замена pin-кнопки + раздел Tagged.
+ * cursor_tags — патч Cursor: ярлыки + замена pin-слота + раздел Tagged.
  *
- * Архитектура:
- *  - Подгружается из workbench.html как ES-module.
- *  - Конфиг ярлыков лежит в соседнем labels.js. Hot-reload в DevTools:
- *      __cursorChatLabelsReloadConfig()
- *  - Cursor пересоздаёт DOM строк чата на hover/focus/banner. Восстановление:
- *      1) MutationObserver на body, первая мутация в кадре → синхронный runDecorateNow.
- *      2) Защита от self-loop: `suppressing` + `firedThisFrame` + идемпотентный applyBadge.
- *  - contextmenu делегирован на document (capture=true).
- *  - Pin-slot: если найдена кнопка pin (defensive heuristic), наш бейдж занимает её место,
- *    оригинальная кнопка скрыта (display:none). Pin/unpin доступны через ПКМ-меню — мы
- *    программно кликаем по скрытой кнопке Cursor'а.
- *  - Раздел Tagged: <li class="cl-tagged-section"> вставляется как первый child .ui-sidebar-menu.
- *    Содержит клоны имён чатов с ярлыком. Click клона → click оригинального btn чата.
+ * Точная разметка Cursor 3.5.x (определена через __cursorChatLabelsInspect):
+ *   li.ui-sidebar-menu-item
+ *     div.ui-button.ui-sidebar-menu-button.glass-sidebar-agent-menu-btn[role="button"]
+ *       div.ui-sidebar-menu-button-icon-wrapper          ← слот для точки/пина
+ *         span.ui-sidebar-menu-button-status-icon         ← точка (.agent-status-dot)
+ *         span.ui-sidebar-menu-button-pin-button          ← обёртка pin-кнопки
+ *           button.ui-icon-button[aria-label="Pin"|"Unpin"]
+ *       div.ui-sidebar-menu-button-content
+ *         span.ui-sidebar-menu-button-label "Имя чата"
+ *       div.ui-sidebar-menu-button-end
+ *
+ * Группы Pinned/Workspaces — это div.ui-sidebar-group с
+ * span.ui-sidebar-label-row-title.ui-sidebar-group-label-title в хедере.
  */
 (function() {
 	'use strict';
 
 	const CSS = `
-.cl-has-label .ui-sidebar-menu-button-label { display: inline-flex !important; align-items: center; gap: 6px; min-width: 0; }
-.cl-has-label .ui-sidebar-menu-button-label > .cl-badge { flex-shrink: 0; }
-.cl-has-label .ui-sidebar-menu-button-label > *:not(.cl-badge) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.cl-has-label { box-shadow: inset 3px 0 0 0 var(--cl-color, transparent); border-radius: 4px; }
-.cl-has-label .ui-sidebar-menu-button-label { color: var(--cl-color, inherit) !important; font-weight: 500; }
-.cl-badge { display: inline-flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1; vertical-align: middle; flex-shrink: 0; }
-.cl-badge-pin { width: 16px; height: 16px; cursor: default; }
+/* Прячем нативную точку и pin-кнопку, когда у чата есть наш ярлык */
+.cl-has-label .ui-sidebar-menu-button-status-icon,
+.cl-has-label .ui-sidebar-menu-button-pin-button { display: none !important; }
 
+/* Наш бейдж в слоте иконки */
+.cl-badge { display: inline-flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1; flex-shrink: 0; }
+.cl-badge-pin { width: 14px; height: 14px; }
+
+/* Левая цветная полоска по краю строки чата */
+.cl-has-label { box-shadow: inset 3px 0 0 0 var(--cl-color, transparent); border-radius: 4px; }
+
+/* Контекстное меню */
 .cl-menu { position: fixed; z-index: 999999; min-width: 200px; background: var(--vscode-menu-background, #2d2d2d); color: var(--vscode-menu-foreground, #f0f0f0); border: 1px solid var(--vscode-menu-border, rgba(255,255,255,0.1)); border-radius: 4px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); padding: 4px 0; font-size: 12px; font-family: var(--vscode-font-family, -apple-system, sans-serif); user-select: none; }
 .cl-menu-header { padding: 4px 12px 6px; font-size: 11px; text-transform: uppercase; opacity: 0.6; border-bottom: 1px solid var(--vscode-menu-separatorBackground, rgba(255,255,255,0.05)); margin-bottom: 4px; }
 .cl-menu-item { display: flex; align-items: center; padding: 5px 12px; cursor: pointer; gap: 8px; }
@@ -38,16 +42,13 @@
 .cl-menu-dot-none { border: 1px solid currentColor; background: transparent !important; }
 .cl-menu-icon { width: 14px; text-align: center; flex-shrink: 0; }
 
-/* Tagged section: используем нативные классы Cursor для items, поэтому шрифт/padding/hover
-   наследуются от его CSS. Дописываем только collapsible-каретку и наш активный фон. */
-.cl-tagged-section { list-style: none; padding: 0; margin: 0; }
-.cl-tagged-section > .cl-tagged-header { font: inherit; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.55; padding: 6px 12px 4px; display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
-.cl-tagged-section > .cl-tagged-header:hover { opacity: 0.85; }
-.cl-tagged-caret { display: inline-block; transition: transform 0.12s; font-size: 9px; opacity: 0.7; width: 9px; }
-.cl-tagged-section.cl-collapsed .cl-tagged-caret { transform: rotate(-90deg); }
-.cl-tagged-section.cl-collapsed > .cl-tagged-list { display: none; }
-.cl-tagged-count { margin-left: auto; opacity: 0.6; font-weight: 400; }
-.cl-tagged-list { list-style: none; padding: 0; margin: 0; }
+/* Tagged group — наследует стили от .ui-sidebar-group / .ui-sidebar-menu-item */
+.cl-tagged-header { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; padding: 6px 8px 4px; }
+.cl-tagged-header:hover .ui-sidebar-group-label-title { opacity: 1; }
+.cl-tagged-caret { display: inline-block; transition: transform 0.12s; font-size: 9px; opacity: 0.7; width: 9px; flex-shrink: 0; }
+.cl-tagged-group.cl-collapsed .cl-tagged-caret { transform: rotate(-90deg); }
+.cl-tagged-group.cl-collapsed > .ui-sidebar-group-content { display: none; }
+.cl-tagged-count { margin-left: auto; opacity: 0.6; font-size: 11px; font-weight: 400; }
 .cl-tagged-item.cl-active-chat .glass-sidebar-agent-menu-btn { background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.25)) !important; }
 `;
 
@@ -74,12 +75,18 @@
 	let LABELS = [NONE_LABEL, ...userLabels];
 
 	const SELECTORS = {
-		listContainer: ['.glass-sidebar-agent-list-container', 'ul.ui-sidebar-menu'],
-		menu:          ['ul.ui-sidebar-menu', '.glass-sidebar-agent-list-container ul'],
 		row:           ['li.ui-sidebar-menu-item'],
 		rowButton:     ['.glass-sidebar-agent-menu-btn'],
 		rowContent:    ['.ui-sidebar-menu-button-content'],
-		rowTitle:      ['.ui-sidebar-menu-button-label']
+		rowTitle:      ['.ui-sidebar-menu-button-label'],
+		// слот, в который нативный Cursor рисует точку статуса / pin-кнопку:
+		pinSlot:       ['.ui-sidebar-menu-button-icon-wrapper'],
+		// сам button pin/unpin (его и кликаем для toggle):
+		pinAction:     ['.ui-sidebar-menu-button-pin-button button'],
+		// группы вида Pinned/Workspaces:
+		groupRoot:     ['.ui-sidebar-group'],
+		groupTitle:    ['.ui-sidebar-group-label-title', '.ui-sidebar-label-row-title'],
+		groupContent:  ['.ui-sidebar-group-content']
 	};
 
 	function loadStoredLabels() {
@@ -100,7 +107,6 @@
 		for (const sel of list) { const el = root.querySelector(sel); if (el) return el; }
 		return null;
 	}
-
 	function findAll(root, list) {
 		const all = [];
 		for (const sel of list) root.querySelectorAll(sel).forEach(el => all.push(el));
@@ -114,58 +120,62 @@
 			if (v) return v;
 		}
 		const titleEl = findFirst(row, SELECTORS.rowTitle);
-		if (titleEl) {
-			let txt = '';
-			for (const node of titleEl.childNodes) {
-				if (node.nodeType === Node.ELEMENT_NODE && node.classList && node.classList.contains('cl-badge')) continue;
-				txt += node.textContent || '';
-			}
-			return txt.trim() || titleEl.textContent.trim();
-		}
+		if (titleEl) return (titleEl.textContent || '').trim();
 		return null;
 	}
 
-	// Defensive поиск pin/dot-кнопки. Точка в незакреплённом чате имеет другое
-	// имя (не "pin"), поэтому ищем pin / dot / indicator / status / codicon.
-	function findPinButton(row) {
-		const explicit = [
-			'.glass-sidebar-agent-pin-btn',
-			'.glass-sidebar-agent-pin',
-			'.glass-sidebar-agent-status-btn',
-			'.glass-sidebar-agent-status',
-			'.glass-sidebar-agent-indicator',
-			'.glass-sidebar-agent-dot',
-			'.ui-sidebar-menu-button-pin',
-			'.ui-sidebar-menu-button-status',
-			'.ui-sidebar-menu-button-indicator',
-			'.ui-sidebar-menu-button-icon',
-			'.ui-sidebar-menu-item-pin',
-			'.codicon-pin',
-			'.codicon-pinned',
-			'.codicon-circle-small',
-			'.codicon-circle-small-filled',
-			'.codicon-record-small',
-			'[class*="codicon-pin"]',
-			'[class*="codicon-dot"]'
-		];
-		for (const sel of explicit) {
-			const el = row.querySelector(sel);
-			if (!el || el.dataset.clBadgeSlot === '1') continue;
-			// если это иконка внутри button — вернуть button (clickable родитель)
-			const btn = el.closest('button, [role="button"]');
-			return btn && btn.dataset.clBadgeSlot !== '1' ? btn : el;
+	function findPinSlot(row)   { return findFirst(row, SELECTORS.pinSlot); }
+	function findPinAction(row) { return findFirst(row, SELECTORS.pinAction); }
+
+	function isRowPinned(row) {
+		const btn = findPinAction(row);
+		if (!btn) return false;
+		const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+		return aria.includes('unpin');
+	}
+
+	function togglePinForRow(row) {
+		const btn = findPinAction(row);
+		if (!btn) return false;
+		// Cursor мог реагировать не на click, а на pointer/mouse-цепочку
+		// (Solid/React handlers часто слушают pointerdown). И сама pin-button у
+		// нас скрыта через CSS — это могло мешать обработчику. Сейчас:
+		//  1. Временно показываем pin-button (через inline !important, чтобы
+		//     перебить наш CSS hide).
+		//  2. Палим всю цепочку pointer/mouse событий + click().
+		//  3. На след. rAF возвращаем display обратно (наш CSS снова скроет
+		//     элемент, но к этому моменту Cursor уже обработал событие).
+		const wrap = btn.closest('.ui-sidebar-menu-button-pin-button');
+		const oldDisplay = wrap ? wrap.style.getPropertyValue('display') : '';
+		const oldPriority = wrap ? wrap.style.getPropertyPriority('display') : '';
+		if (wrap) {
+			wrap.style.setProperty('display', 'flex', 'important');
+			void wrap.offsetWidth;
 		}
-		const all = row.querySelectorAll('*');
-		for (const el of all) {
-			if (el.dataset && el.dataset.clBadgeSlot === '1') continue;
-			const cls = ((el.className || '') + '').toLowerCase();
-			const aria = ((el.getAttribute && el.getAttribute('aria-label')) || '').toLowerCase();
-			const title = ((el.getAttribute && el.getAttribute('title')) || '').toLowerCase();
-			if (/(?:^|[\W_])pin(?:[\W_]|$)/.test(cls) || /pin/.test(aria) || /pin/.test(title)) {
-				return el.closest('button, [role="button"]') || el;
-			}
+		const rect = btn.getBoundingClientRect();
+		const opts = {
+			bubbles: true, cancelable: true,
+			clientX: rect.left + rect.width / 2,
+			clientY: rect.top + rect.height / 2,
+			button: 0
+		};
+		try {
+			btn.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerId: 1, pointerType: 'mouse' }));
+			btn.dispatchEvent(new MouseEvent('mousedown', opts));
+			btn.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerId: 1, pointerType: 'mouse' }));
+			btn.dispatchEvent(new MouseEvent('mouseup', opts));
+			btn.dispatchEvent(new MouseEvent('click', opts));
+			btn.click();
+		} catch (err) {
+			console.warn('[chat-labels] pin dispatch failed', err);
 		}
-		return null;
+		if (wrap) {
+			requestAnimationFrame(() => requestAnimationFrame(() => {
+				if (oldDisplay) wrap.style.setProperty('display', oldDisplay, oldPriority);
+				else wrap.style.removeProperty('display');
+			}));
+		}
+		return true;
 	}
 
 	function isRowActive(row) {
@@ -182,49 +192,21 @@
 		return false;
 	}
 
-	function isRowPinned(row) {
-		const pinBtn = findPinButton(row);
-		if (!pinBtn) return false;
-		const aria = (pinBtn.getAttribute('aria-label') || '').toLowerCase();
-		const title = (pinBtn.getAttribute('title') || '').toLowerCase();
-		const cls = ((pinBtn.className || '') + '').toLowerCase();
-		return aria.includes('unpin') || title.includes('unpin') ||
-		       cls.includes('pinned') || pinBtn.getAttribute('aria-pressed') === 'true';
-	}
-
-	function togglePinForRow(row) {
-		const pinBtn = findPinButton(row);
-		if (!pinBtn) {
-			console.warn('[chat-labels] pin button not found in row');
-			return false;
-		}
-		// Если мы его скрыли — на момент click() display не важен (click() работает).
-		pinBtn.click();
-		return true;
-	}
-
-	// Идемпотентный apply.
+	// Идемпотентный apply: наш бейдж в слоте иконки нативной точки.
 	function applyBadge(row, labels) {
 		const key = getChatKey(row);
 		if (!key) return;
 		const btn = findFirst(row, SELECTORS.rowButton) || row;
-		const labelEl = findFirst(row, SELECTORS.rowTitle);
-		const pinBtn = findPinButton(row);
+		const slot = findPinSlot(row);
 
 		const labelId = labels[key];
 		const label = LABELS.find(l => l.id === labelId);
 		const hasLabel = label && label.id !== 'none';
 
 		if (!hasLabel) {
-			// Удалить наш бейдж (из обоих возможных мест)
 			row.querySelectorAll('.cl-badge').forEach(el => el.remove());
 			if (btn.classList.contains('cl-has-label')) btn.classList.remove('cl-has-label');
 			if (btn.style.getPropertyValue('--cl-color')) btn.style.removeProperty('--cl-color');
-			// Вернуть видимость скрытой Cursor'овской pin-кнопки, если мы её прятали
-			if (pinBtn && pinBtn.dataset.clBadgeSlot === '1') {
-				pinBtn.style.display = '';
-				delete pinBtn.dataset.clBadgeSlot;
-			}
 			return;
 		}
 
@@ -233,38 +215,31 @@
 			btn.style.setProperty('--cl-color', label.color);
 		}
 
-		// Pin-slot путь: если pin-кнопка найдена — наш бейдж в её место, оригинал прячем.
-		if (pinBtn) {
-			if (pinBtn.style.display !== 'none') pinBtn.style.display = 'none';
-			pinBtn.dataset.clBadgeSlot = '1';
-
-			// Уберём бейдж из label-слота, если он там оказался от прошлой версии.
-			if (labelEl) {
-				const inLabel = labelEl.querySelector(':scope > .cl-badge');
-				if (inLabel && inLabel.parentElement === labelEl) inLabel.remove();
-			}
-
-			const parent = pinBtn.parentElement;
-			let badge = parent.querySelector(':scope > .cl-badge-pin');
+		// Если слот иконки найден — наш бейдж туда. Если нет — fallback на label.
+		if (slot) {
+			let badge = slot.querySelector(':scope > .cl-badge-pin');
 			if (!badge) {
 				badge = document.createElement('span');
 				badge.className = 'cl-badge cl-badge-pin';
-				parent.insertBefore(badge, pinBtn.nextSibling);
+				slot.appendChild(badge);
 			}
 			if (badge.textContent !== label.icon) badge.textContent = label.icon;
 			if (badge.title !== label.title) badge.title = label.title;
+			// Подчистим возможный fallback-бейдж из label-слота
+			const labelEl = findFirst(row, SELECTORS.rowTitle);
+			if (labelEl) {
+				const inLabel = labelEl.querySelector(':scope > .cl-badge:not(.cl-badge-pin)');
+				if (inLabel) inLabel.remove();
+			}
 			return;
 		}
 
-		// Fallback: pin-кнопку не нашли — бейдж в начало label.
+		// Fallback (если разметка Cursor другая)
+		const labelEl = findFirst(row, SELECTORS.rowTitle);
 		if (!labelEl) return;
-		const existing = labelEl.querySelector(':scope > .cl-badge') || row.querySelector('.cl-badge');
+		const existing = labelEl.querySelector(':scope > .cl-badge');
 		if (existing) {
-			if (existing.parentElement !== labelEl) {
-				labelEl.insertBefore(existing, labelEl.firstChild);
-			}
 			if (existing.textContent !== label.icon) existing.textContent = label.icon;
-			if (existing.title !== label.title) existing.title = label.title;
 			return;
 		}
 		const badge = document.createElement('span');
@@ -274,60 +249,140 @@
 		labelEl.insertBefore(badge, labelEl.firstChild);
 	}
 
-	// ---- Tagged section ------------------------------------------------------
-	function isTaggedCollapsed() {
-		return localStorage.getItem(COLLAPSED_KEY) === '1';
-	}
-	function setTaggedCollapsed(v) {
-		localStorage.setItem(COLLAPSED_KEY, v ? '1' : '0');
+	// ---- Tagged group --------------------------------------------------------
+	function isTaggedCollapsed() { return localStorage.getItem(COLLAPSED_KEY) === '1'; }
+	function setTaggedCollapsed(v) { localStorage.setItem(COLLAPSED_KEY, v ? '1' : '0'); }
+
+	function findPinnedGroup() {
+		const titles = document.querySelectorAll('.ui-sidebar-group-label-title');
+		for (const t of titles) {
+			if ((t.textContent || '').trim().toLowerCase() === 'pinned') {
+				return t.closest('.ui-sidebar-group');
+			}
+		}
+		return null;
 	}
 
-	function ensureTaggedSection(menuEl) {
-		let section = menuEl.querySelector(':scope > .cl-tagged-section');
-		if (section) return section;
-		section = document.createElement('li');
-		section.className = 'cl-tagged-section';
-		if (isTaggedCollapsed()) section.classList.add('cl-collapsed');
+	function findGroupsContainer() {
+		// Любая существующая группа Pinned/Workspaces даёт нам контейнер.
+		const anyGroup = document.querySelector('.ui-sidebar-group:not(.cl-tagged-group)');
+		return anyGroup ? anyGroup.parentElement : null;
+	}
+
+	function ensureTaggedGroup() {
+		const container = findGroupsContainer();
+		if (!container) return null;
+		let group = container.querySelector(':scope > .cl-tagged-group');
+		if (group) return group;
+
+		group = document.createElement('div');
+		group.className = 'ui-sidebar-group cl-tagged-group';
+		if (isTaggedCollapsed()) group.classList.add('cl-collapsed');
+
 		const header = document.createElement('div');
 		header.className = 'cl-tagged-header';
 		const caret = document.createElement('span');
 		caret.className = 'cl-tagged-caret';
 		caret.textContent = '▼';
-		const headerText = document.createElement('span');
-		headerText.textContent = 'TAGGED';
+		const title = document.createElement('span');
+		title.className = 'ui-sidebar-label-row-title ui-sidebar-group-label-title';
+		title.textContent = 'Tagged';
 		const count = document.createElement('span');
 		count.className = 'cl-tagged-count';
 		header.appendChild(caret);
-		header.appendChild(headerText);
+		header.appendChild(title);
 		header.appendChild(count);
 		header.addEventListener('click', (ev) => {
 			ev.preventDefault();
 			ev.stopPropagation();
-			const wasCollapsed = section.classList.contains('cl-collapsed');
-			section.classList.toggle('cl-collapsed');
+			const wasCollapsed = group.classList.contains('cl-collapsed');
+			group.classList.toggle('cl-collapsed');
 			setTaggedCollapsed(!wasCollapsed);
 		});
+
+		const content = document.createElement('div');
+		content.className = 'ui-sidebar-group-content';
 		const list = document.createElement('ul');
-		list.className = 'cl-tagged-list';
-		section.appendChild(header);
-		section.appendChild(list);
-		menuEl.insertBefore(section, menuEl.firstChild);
-		return section;
+		list.className = 'ui-sidebar-menu cl-tagged-list';
+		content.appendChild(list);
+
+		group.appendChild(header);
+		group.appendChild(content);
+
+		// Расположение: после Pinned, иначе в начало.
+		const pinned = findPinnedGroup();
+		if (pinned && pinned.parentElement === container) {
+			container.insertBefore(group, pinned.nextSibling);
+		} else {
+			container.insertBefore(group, container.firstChild);
+		}
+		return group;
 	}
 
-	function updateTaggedSection() {
-		const menuEl = findFirst(document, SELECTORS.menu);
-		if (!menuEl) return;
-		const section = ensureTaggedSection(menuEl);
-		const list = section.querySelector(':scope > .cl-tagged-list');
-		const countEl = section.querySelector(':scope > .cl-tagged-header > .cl-tagged-count');
+	function createTaggedItem(key, label) {
+		const li = document.createElement('li');
+		li.className = 'ui-sidebar-menu-item cl-tagged-item';
+		li.dataset.clKey = key;
+
+		const btn = document.createElement('div');
+		btn.className = 'ui-button ui-sidebar-menu-button glass-sidebar-agent-menu-btn cl-tagged-btn';
+		btn.setAttribute('role', 'button');
+		btn.tabIndex = 0;
+		btn.setAttribute('data-variant', 'ghost');
+		btn.setAttribute('data-label-tone', 'default');
+
+		const iconWrap = document.createElement('div');
+		iconWrap.className = 'ui-sidebar-menu-button-icon-wrapper';
+		const badge = document.createElement('span');
+		badge.className = 'cl-badge cl-badge-pin';
+		iconWrap.appendChild(badge);
+
+		const content = document.createElement('div');
+		content.className = 'ui-sidebar-menu-button-content';
+		const labelEl = document.createElement('span');
+		labelEl.className = 'ui-text ui-sidebar-menu-button-label';
+		labelEl.setAttribute('data-variant', 'default');
+		labelEl.setAttribute('data-size', 'md');
+		labelEl.setAttribute('data-weight', 'regular');
+		content.appendChild(labelEl);
+
+		btn.appendChild(iconWrap);
+		btn.appendChild(content);
+		li.appendChild(btn);
+
+		const clickHandler = (ev) => {
+			ev.preventDefault();
+			ev.stopPropagation();
+			ev.stopImmediatePropagation();
+			const orig = li.__clOriginalRow;
+			const tryClick = (r) => {
+				const b = findFirst(r, SELECTORS.rowButton);
+				if (b) { b.click(); return true; }
+				return false;
+			};
+			if (orig && orig.isConnected && tryClick(orig)) return;
+			for (const r of findAll(document, SELECTORS.row)) {
+				if (r.closest('.cl-tagged-group')) continue;
+				if (getChatKey(r) === li.dataset.clKey) { tryClick(r); return; }
+			}
+		};
+		btn.addEventListener('click', clickHandler, true);
+		btn.addEventListener('mousedown', (ev) => { ev.stopPropagation(); }, true);
+
+		return li;
+	}
+
+	function updateTaggedGroup() {
+		const group = ensureTaggedGroup();
+		if (!group) return;
+		const list = group.querySelector('.cl-tagged-list');
+		const countEl = group.querySelector('.cl-tagged-count');
 
 		const labels = loadStoredLabels();
-		const allRows = findAll(document, SELECTORS.row).filter(r => !r.closest('.cl-tagged-section'));
+		const rows = findAll(document, SELECTORS.row).filter(r => !r.closest('.cl-tagged-group'));
 
-		// Собираем чаты с ярлыками
 		const tagged = [];
-		for (const row of allRows) {
+		for (const row of rows) {
 			const key = getChatKey(row);
 			if (!key) continue;
 			const labelId = labels[key];
@@ -336,17 +391,6 @@
 			if (!label) continue;
 			tagged.push({ row, key, label });
 		}
-
-		// Идемпотентное обновление списка через data-key
-		const wantedKeys = new Set(tagged.map(t => t.key));
-		const existingItems = new Map();
-		list.querySelectorAll(':scope > .cl-tagged-item').forEach(item => {
-			const k = item.dataset.clKey;
-			if (k && wantedKeys.has(k)) existingItems.set(k, item);
-			else item.remove();
-		});
-
-		// Сортируем по id ярлыка, затем по имени
 		tagged.sort((a, b) => {
 			const ai = LABELS.findIndex(l => l.id === a.label.id);
 			const bi = LABELS.findIndex(l => l.id === b.label.id);
@@ -354,98 +398,49 @@
 			return a.key.localeCompare(b.key);
 		});
 
-		// Обновить/создать. Имитируем нативную разметку row, чтобы шрифт/padding/hover
-		// наследовались от стилей Cursor.
-		for (let i = 0; i < tagged.length; i++) {
-			const { row, key, label } = tagged[i];
-			let item = existingItems.get(key);
+		// Идемпотентное обновление
+		const wantedKeys = new Set(tagged.map(t => t.key));
+		const existing = new Map();
+		list.querySelectorAll(':scope > .cl-tagged-item').forEach(item => {
+			const k = item.dataset.clKey;
+			if (k && wantedKeys.has(k)) existing.set(k, item);
+			else item.remove();
+		});
+		for (const { row, key, label } of tagged) {
+			let item = existing.get(key);
 			if (!item) {
-				item = document.createElement('li');
-				item.className = 'ui-sidebar-menu-item cl-tagged-item';
-				item.dataset.clKey = key;
-				const btn = document.createElement('div');
-				btn.className = 'glass-sidebar-agent-menu-btn cl-tagged-btn';
-				btn.setAttribute('role', 'button');
-				btn.tabIndex = 0;
-				const content = document.createElement('div');
-				content.className = 'ui-sidebar-menu-button-content';
-				const labelEl = document.createElement('div');
-				labelEl.className = 'ui-sidebar-menu-button-label';
-				labelEl.style.display = 'inline-flex';
-				labelEl.style.alignItems = 'center';
-				labelEl.style.gap = '6px';
-				labelEl.style.minWidth = '0';
-				const badge = document.createElement('span');
-				badge.className = 'cl-badge';
-				badge.style.flexShrink = '0';
-				const text = document.createElement('span');
-				text.className = 'cl-tagged-item-text';
-				text.style.overflow = 'hidden';
-				text.style.textOverflow = 'ellipsis';
-				text.style.whiteSpace = 'nowrap';
-				text.style.minWidth = '0';
-				labelEl.appendChild(badge);
-				labelEl.appendChild(text);
-				content.appendChild(labelEl);
-				btn.appendChild(content);
-				item.appendChild(btn);
-
-				const clickHandler = (ev) => {
-					ev.preventDefault();
-					ev.stopPropagation();
-					ev.stopImmediatePropagation();
-					const orig = item.__clOriginalRow;
-					const tryClick = (r) => {
-						const b = findFirst(r, SELECTORS.rowButton);
-						if (b) { b.click(); return true; }
-						return false;
-					};
-					if (orig && orig.isConnected && tryClick(orig)) return;
-					for (const r of findAll(document, SELECTORS.row)) {
-						if (r.closest('.cl-tagged-section')) continue;
-						if (getChatKey(r) === item.dataset.clKey) { tryClick(r); return; }
-					}
-				};
-				btn.addEventListener('click', clickHandler, true);
-				btn.addEventListener('mousedown', (ev) => { ev.stopPropagation(); }, true);
+				item = createTaggedItem(key, label);
 				list.appendChild(item);
 			}
 			item.__clOriginalRow = row;
 			const badge = item.querySelector('.cl-badge');
 			if (badge && badge.textContent !== label.icon) badge.textContent = label.icon;
 			if (badge) badge.title = label.title;
-			const text = item.querySelector('.cl-tagged-item-text');
-			if (text && text.textContent !== key) text.textContent = key;
+			const labelEl = item.querySelector('.ui-sidebar-menu-button-label');
+			if (labelEl && labelEl.textContent !== key) labelEl.textContent = key;
 
-			// Подсвечивать активный чат
 			const isActive = isRowActive(row);
-			const wasActive = item.classList.contains('cl-active-chat');
-			if (isActive !== wasActive) item.classList.toggle('cl-active-chat', isActive);
+			if (item.classList.contains('cl-active-chat') !== isActive) item.classList.toggle('cl-active-chat', isActive);
 		}
-
-		// Восстановить порядок согласно sorted (сначала собираем уже размещённые)
+		// порядок по sorted
 		for (const t of tagged) {
 			const item = list.querySelector(`:scope > .cl-tagged-item[data-cl-key="${CSS.escape(t.key)}"]`);
 			if (item) list.appendChild(item);
 		}
 
-		// Count в заголовке
 		const newCount = tagged.length > 0 ? String(tagged.length) : '';
-		if (countEl.textContent !== newCount) countEl.textContent = newCount;
-
-		// Скрыть секцию, если пусто
+		if (countEl && countEl.textContent !== newCount) countEl.textContent = newCount;
 		const shouldHide = tagged.length === 0;
-		const isHidden = section.style.display === 'none';
-		if (shouldHide && !isHidden) section.style.display = 'none';
-		if (!shouldHide && isHidden) section.style.display = '';
+		const isHidden = group.style.display === 'none';
+		if (shouldHide && !isHidden) group.style.display = 'none';
+		if (!shouldHide && isHidden) group.style.display = '';
 	}
 
 	function decorateAll() {
 		const labels = loadStoredLabels();
-		// фильтруем наши клоны из Tagged-раздела, чтобы не декорировать самих себя
-		const rows = findAll(document, SELECTORS.row).filter(r => !r.closest('.cl-tagged-section'));
+		const rows = findAll(document, SELECTORS.row).filter(r => !r.closest('.cl-tagged-group'));
 		for (const row of rows) applyBadge(row, labels);
-		updateTaggedSection();
+		updateTaggedGroup();
 		return rows.length;
 	}
 
@@ -459,11 +454,9 @@
 		if (inDecorate) return;
 		inDecorate = true;
 		suppressing = true;
-		try {
-			decorateAll();
-		} catch (err) {
-			console.warn('[chat-labels] decorate err', err);
-		} finally {
+		try { decorateAll(); }
+		catch (err) { console.warn('[chat-labels] decorate err', err); }
+		finally {
 			inDecorate = false;
 			requestAnimationFrame(() => { suppressing = false; });
 		}
@@ -474,20 +467,15 @@
 		if (suppressing || observerDisabled || firedThisFrame) return;
 		firedThisFrame = true;
 		requestAnimationFrame(() => { firedThisFrame = false; });
-		try {
-			runDecorateNow();
-		} catch (err) {
+		try { runDecorateNow(); }
+		catch (err) {
 			observerErrors++;
 			console.warn('[chat-labels] observer err', err);
-			if (observerErrors > 10) {
-				console.error('[chat-labels] too many errors, disabling observer');
-				observer.disconnect();
-				observerDisabled = true;
-			}
+			if (observerErrors > 10) { observer.disconnect(); observerDisabled = true; }
 		}
 	});
 
-	// ---- Меню ----------------------------------------------------------------
+	// ---- Контекстное меню ----------------------------------------------------
 	function showMenu(row, x, y) {
 		document.querySelectorAll('.cl-menu').forEach(m => m.remove());
 		const key = getChatKey(row);
@@ -502,17 +490,18 @@
 		header.textContent = (key.length > 30 ? key.slice(0, 30) + '…' : key);
 		menu.appendChild(header);
 
-		// Pin/unpin item
-		const pinBtn = findPinButton(row);
+		// Pin / Unpin
+		const pinBtn = findPinAction(row);
+		const pinned = isRowPinned(row);
 		const pinItem = document.createElement('div');
 		pinItem.className = 'cl-menu-item';
 		if (!pinBtn) pinItem.classList.add('cl-menu-disabled');
 		const pinIcon = document.createElement('span');
 		pinIcon.className = 'cl-menu-icon';
-		pinIcon.textContent = '📌';
+		pinIcon.textContent = pinned ? '📍' : '📌';
 		pinItem.appendChild(pinIcon);
 		const pinText = document.createElement('span');
-		pinText.textContent = isRowPinned(row) ? 'Открепить' : 'Закрепить';
+		pinText.textContent = pinned ? 'Открепить' : 'Закрепить';
 		pinItem.appendChild(pinText);
 		if (pinBtn) {
 			pinItem.addEventListener('click', () => {
@@ -581,7 +570,7 @@
 		if (!(target instanceof Element)) return;
 		const row = target.closest('li.ui-sidebar-menu-item');
 		if (!row) return;
-		if (row.closest('.cl-tagged-section')) return; // ПКМ на клонах из Tagged — игнорируем
+		if (row.closest('.cl-tagged-group')) return; // ПКМ на клонах в Tagged игнорируем
 		if (!row.querySelector('.glass-sidebar-agent-menu-btn')) return;
 		ev.preventDefault();
 		ev.stopPropagation();
@@ -603,9 +592,9 @@
 				console.log('[chat-labels] config loaded:', userLabels.length, 'labels');
 				return true;
 			}
-			console.warn('[chat-labels] labels.js exports пустой / некорректный, используются дефолты');
+			console.warn('[chat-labels] labels.js пустой / некорректный, используются дефолты');
 		} catch (err) {
-			console.warn('[chat-labels] labels.js не загрузился, используются дефолты', err);
+			console.warn('[chat-labels] labels.js не загрузился', err);
 		}
 		return false;
 	}
@@ -615,7 +604,7 @@
 		observer.observe(document.body, { childList: true, subtree: true });
 		runDecorateNow();
 		const initialCount = findAll(document, SELECTORS.row).length;
-		console.log('%c[chat-labels v5] booted', 'color: #27ae60; font-weight: bold', { rowsDecorated: initialCount, labels: userLabels.length });
+		console.log('%c[chat-labels v7] booted', 'color: #27ae60; font-weight: bold', { rowsDecorated: initialCount, labels: userLabels.length });
 	})();
 
 	// ---- Public helpers ------------------------------------------------------
@@ -626,10 +615,6 @@
 			el.classList.remove('cl-has-label');
 			el.style.removeProperty('--cl-color');
 		});
-		document.querySelectorAll('[data-cl-badge-slot="1"]').forEach(el => {
-			el.style.display = '';
-			delete el.dataset.clBadgeSlot;
-		});
 		runDecorateNow();
 		return ok ? 'config reloaded' : 'config not loaded — using defaults';
 	};
@@ -638,14 +623,10 @@
 		observerDisabled = true;
 		observer.disconnect();
 		document.removeEventListener('contextmenu', contextMenuHandler, true);
-		document.querySelectorAll('.cl-badge, .cl-menu, .cl-tagged-section, #cursor-chat-labels-style').forEach(el => el.remove());
+		document.querySelectorAll('.cl-badge, .cl-menu, .cl-tagged-group, #cursor-chat-labels-style').forEach(el => el.remove());
 		document.querySelectorAll('.cl-has-label').forEach(el => {
 			el.classList.remove('cl-has-label');
 			el.style.removeProperty('--cl-color');
-		});
-		document.querySelectorAll('[data-cl-badge-slot="1"]').forEach(el => {
-			el.style.display = '';
-			delete el.dataset.clBadgeSlot;
 		});
 		delete window.__cursorChatLabelsCleanup;
 		console.log('[chat-labels] cleaned up');
@@ -654,7 +635,6 @@
 	window.__cursorChatLabelsDebug = function() {
 		console.group('[chat-labels] debug');
 		console.log('Rows found:', findAll(document, SELECTORS.row).length);
-		console.log('Menu container:', findFirst(document, SELECTORS.menu));
 		console.log('Stored labels:', loadStoredLabels());
 		console.log('Active label set:', LABELS);
 		console.log('Suppressing:', suppressing, '| FiredThisFrame:', firedThisFrame, '| Disabled:', observerDisabled);
@@ -662,114 +642,94 @@
 		console.groupEnd();
 	};
 
-	// Diagnostics: запусти в DevTools и пришли вывод. Дампит подробно один
-	// незакреплённый row (где есть та "точка"), один закреплённый row (если есть),
-	// активный row, контейнеры и headings — этого хватит чтобы подогнать селекторы.
+	// Дампит computed CSS заголовков и items группы Pinned (или Workspaces),
+	// чтобы можно было точно подогнать стиль Tagged.
+	window.__cursorChatLabelsInspectStyles = function() {
+		const lines = [];
+		const log = (s) => lines.push(s);
+		log('=== chat-labels inspect styles ===');
+
+		const props = [
+			'fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'textTransform',
+			'color', 'opacity', 'padding', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+			'margin', 'marginTop', 'marginRight', 'marginBottom', 'marginLeft',
+			'display', 'alignItems', 'gap', 'lineHeight', 'background', 'borderRadius'
+		];
+		function dumpComputed(label, el) {
+			if (!el) { log(`--- ${label}: NOT FOUND ---\n`); return; }
+			const cs = getComputedStyle(el);
+			log(`--- ${label} ---`);
+			log(`tag: ${el.tagName.toLowerCase()}, class: "${el.className}"`);
+			for (const p of props) log(`  ${p}: ${cs[p]}`);
+			log('');
+		}
+
+		// Заголовки нативных групп
+		const allTitles = Array.from(document.querySelectorAll('.ui-sidebar-group-label-title'));
+		const pinnedTitle = allTitles.find(t => (t.textContent || '').trim().toLowerCase() === 'pinned');
+		const workspacesTitle = allTitles.find(t => (t.textContent || '').trim().toLowerCase() === 'workspaces');
+		dumpComputed('Pinned title span', pinnedTitle);
+		dumpComputed('Workspaces title span', workspacesTitle);
+
+		// Контейнер заголовка (parent span'а)
+		if (pinnedTitle) {
+			dumpComputed('Pinned title parent', pinnedTitle.parentElement);
+			let p = pinnedTitle.parentElement;
+			let depth = 0;
+			while (p && depth < 5 && !p.classList.contains('ui-sidebar-group')) {
+				dumpComputed(`Pinned ancestor [${depth}]`, p);
+				p = p.parentElement;
+				depth++;
+			}
+			if (p) dumpComputed('Pinned group root', p);
+		}
+
+		// Один item чата
+		const firstRow = document.querySelector('li.ui-sidebar-menu-item:not(.cl-tagged-item)');
+		if (firstRow) {
+			dumpComputed('Row item li', firstRow);
+			dumpComputed('Row btn', firstRow.querySelector('.glass-sidebar-agent-menu-btn'));
+			dumpComputed('Row label', firstRow.querySelector('.ui-sidebar-menu-button-label'));
+			dumpComputed('Row icon-wrapper', firstRow.querySelector('.ui-sidebar-menu-button-icon-wrapper'));
+		}
+
+		// Наш заголовок Tagged для сравнения
+		const taggedHeader = document.querySelector('.cl-tagged-header');
+		if (taggedHeader) {
+			dumpComputed('OUR Tagged header div', taggedHeader);
+			dumpComputed('OUR Tagged title span', taggedHeader.querySelector('.ui-sidebar-group-label-title'));
+		}
+
+		const out = lines.join('\n');
+		console.log(out);
+		try { if (navigator.clipboard) navigator.clipboard.writeText(out); } catch(e) {}
+		return out;
+	};
+
 	window.__cursorChatLabelsInspect = function() {
 		const lines = [];
 		const log = (s) => lines.push(s);
 		log('=== chat-labels inspect ===');
-		log('Cursor user-agent: ' + navigator.userAgent);
+		log('UA: ' + navigator.userAgent);
 		log('');
-
-		const rows = Array.from(document.querySelectorAll('li.ui-sidebar-menu-item'))
-			.filter(r => !r.closest('.cl-tagged-section'));
-		log(`Total rows (excl. our Tagged clones): ${rows.length}`);
-		log('');
-
-		// Найти разные классы row для дампа
-		const stored = loadStoredLabels();
-		const unpinned = rows.find(r => !isRowPinned(r));
+		const rows = Array.from(document.querySelectorAll('li.ui-sidebar-menu-item')).filter(r => !r.closest('.cl-tagged-group'));
+		log(`Total rows (excl. Tagged clones): ${rows.length}`);
 		const pinned = rows.find(r => isRowPinned(r));
+		const unpinned = rows.find(r => !isRowPinned(r));
 		const active = rows.find(r => isRowActive(r));
-
-		function dumpRow(label, row) {
-			if (!row) { log(`--- ${label}: NOT FOUND ---`); log(''); return; }
-			log(`--- ${label}: outerHTML (truncated 3500) ---`);
+		function dump(label, row) {
+			if (!row) { log(`--- ${label}: NOT FOUND ---\n`); return; }
+			log(`--- ${label}: outerHTML (3500) ---`);
 			log(row.outerHTML.slice(0, 3500));
-			log('');
-			log(`--- ${label}: element tree ---`);
-			function walk(el, depth) {
-				const cls = ((el.className || '') + '').trim().split(/\s+/).filter(c => c).join('.');
-				const aria = el.getAttribute && el.getAttribute('aria-label');
-				const title = el.getAttribute && el.getAttribute('title');
-				const role = el.getAttribute && el.getAttribute('role');
-				const ariaSelected = el.getAttribute && el.getAttribute('aria-selected');
-				const txt = (el.children.length === 0 && el.textContent) ? `"${el.textContent.trim().slice(0, 40)}"` : '';
-				let summary = `${'  '.repeat(depth)}${el.tagName.toLowerCase()}${cls ? '.' + cls : ''}`;
-				if (aria) summary += ` aria="${aria}"`;
-				if (title) summary += ` title="${title}"`;
-				if (role) summary += ` role="${role}"`;
-				if (ariaSelected) summary += ` aria-selected="${ariaSelected}"`;
-				if (txt) summary += ` ${txt}`;
-				log(summary);
-				for (const c of el.children) walk(c, depth + 1);
-			}
-			walk(row, 0);
-			log('');
-			log(`--- ${label}: findPinButton result ---`);
-			const pin = findPinButton(row);
-			if (pin) {
-				log(`  Found: ${pin.tagName.toLowerCase()}.${(pin.className + '').trim()} aria="${pin.getAttribute('aria-label') || ''}" title="${pin.getAttribute('title') || ''}"`);
-			} else {
-				log('  NOT FOUND — нужно дописать селектор в findPinButton');
-			}
-			log(`--- ${label}: isRowActive=${isRowActive(row)} isRowPinned=${isRowPinned(row)} ---`);
-			log('');
+			log(`--- ${label}: pinSlot=${!!findPinSlot(row)} pinAction=${!!findPinAction(row)} isPinned=${isRowPinned(row)} isActive=${isRowActive(row)} ---\n`);
 		}
-
-		dumpRow('UNPINNED ROW (для слота под нашу иконку)', unpinned);
-		dumpRow('PINNED ROW (узнать как Cursor помечает закреп)', pinned);
-		if (active && active !== unpinned && active !== pinned) {
-			dumpRow('ACTIVE ROW (для подсветки в Tagged)', active);
-		}
-
-		log('--- Sidebar headings (поиск "Pinned" / "Workspaces" для стилизации Tagged) ---');
-		document.querySelectorAll('h1, h2, h3, h4, h5, [role="heading"], [class*="header" i], [class*="title" i]').forEach(h => {
-			const txt = (h.textContent || '').trim();
-			if (!txt || txt.length > 80) return;
-			const cls = ((h.className || '') + '').trim().split(/\s+/).filter(c => c).slice(0, 5).join('.');
-			log(`  "${txt}" — ${h.tagName.toLowerCase()}${cls ? '.' + cls : ''}`);
-		});
-
-		log('');
-		log('--- Containers вверх от первого row ---');
-		if (rows.length > 0) {
-			let p = rows[0].parentElement;
-			let depth = 0;
-			while (p && depth < 6) {
-				const cls = ((p.className || '') + '').trim().split(/\s+/).filter(c => c).slice(0, 5).join('.');
-				log(`  [${depth}] ${p.tagName.toLowerCase()}${cls ? '.' + cls : ''}`);
-				p = p.parentElement;
-				depth++;
-			}
-		}
-
-		log('');
-		log('--- Все элементы с pin/dot/indicator/status в class/aria/title (документ) ---');
-		const seen = new Set();
-		document.querySelectorAll('*').forEach(el => {
-			const cls = ((el.className || '') + '').toLowerCase();
-			const aria = ((el.getAttribute && el.getAttribute('aria-label')) || '').toLowerCase();
-			const title = ((el.getAttribute && el.getAttribute('title')) || '').toLowerCase();
-			const haystack = cls + ' ' + aria + ' ' + title;
-			if (/(?:^|\W)(pin|dot|indicator|status|bullet|leading|circle-small)(?:\W|$)/.test(haystack)) {
-				const key = (el.tagName + '|' + cls + '|' + aria).slice(0, 100);
-				if (seen.has(key)) return;
-				seen.add(key);
-				const c = ((el.className || '') + '').trim().split(/\s+/).filter(x => x).slice(0, 6).join('.');
-				log(`  ${el.tagName.toLowerCase()}.${c} aria="${aria}" title="${title}"`);
-			}
-		});
+		dump('UNPINNED', unpinned);
+		dump('PINNED', pinned);
+		if (active && active !== unpinned && active !== pinned) dump('ACTIVE', active);
 
 		const out = lines.join('\n');
 		console.log(out);
-		try {
-			if (navigator.clipboard && navigator.clipboard.writeText) {
-				navigator.clipboard.writeText(out);
-				console.log('%c[chat-labels] inspect output copied to clipboard', 'color: #27ae60');
-			}
-		} catch (e) { /* ignore */ }
+		try { if (navigator.clipboard) navigator.clipboard.writeText(out); } catch(e) {}
 		return out;
 	};
 })();
