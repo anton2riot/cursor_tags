@@ -57,6 +57,16 @@
 .cl-menu-dot-none { border: 1px solid currentColor; background: transparent !important; }
 .cl-menu-icon { width: 14px; text-align: center; flex-shrink: 0; }
 
+/* Unread-индикация: раньше Cursor показывал точку (синюю/серую), но мы её
+   скрываем. Цвет/жирность label теперь показывают, что чат ожидает прочтения. */
+.cl-status-unseen .ui-sidebar-menu-button-label { color: var(--vscode-foreground, #fff) !important; font-weight: 600 !important; }
+.cl-status-seen .ui-sidebar-menu-button-label { color: var(--vscode-descriptionForeground, rgba(255,255,255,0.55)) !important; }
+
+/* Имена воркспейсов (Home / am_miroai / aquascapes / …) — жирным. У них
+   ui-sidebar-label-row-title без ui-sidebar-group-label-title (последний
+   только у заголовков групп Pinned/Workspaces/Tagged). */
+.ui-sidebar-label-row-title:not(.ui-sidebar-group-label-title) { font-weight: 600 !important; }
+
 /* Tagged group — клонированный header из Pinned даёт нам typography бесплатно. */
 .cl-tagged-header { cursor: pointer; user-select: none; }
 /* Когда наша группа свёрнута, поворачиваем chevron нативного header'а */
@@ -504,13 +514,18 @@
 			const labelEl = item.querySelector('.ui-sidebar-menu-button-label');
 			if (labelEl && labelEl.textContent !== key) labelEl.textContent = key;
 
-			// Цветная полоска для клона — через тот же класс/CSS variable, что у оригиналов.
+			// Цветная полоска и статус unread/seen — переносим с оригинала на клон.
 			const cloneBtn = item.querySelector('.cl-tagged-btn');
 			if (cloneBtn) {
 				if (!cloneBtn.classList.contains('cl-has-label')) cloneBtn.classList.add('cl-has-label');
 				if (cloneBtn.style.getPropertyValue('--cl-color') !== label.color) {
 					cloneBtn.style.setProperty('--cl-color', label.color);
 				}
+				const status = getRowStatus(row);
+				const wantSeen = status === 'seen';
+				const wantUnseen = status === 'unseen';
+				if (cloneBtn.classList.contains('cl-status-seen') !== wantSeen) cloneBtn.classList.toggle('cl-status-seen', wantSeen);
+				if (cloneBtn.classList.contains('cl-status-unseen') !== wantUnseen) cloneBtn.classList.toggle('cl-status-unseen', wantUnseen);
 			}
 
 			const isActive = isRowActive(row);
@@ -530,10 +545,38 @@
 		if (!shouldHide && isHidden) group.style.display = '';
 	}
 
+	// Unread/seen статус — берём из нативного .agent-status-dot, переносим
+	// на btn классом, CSS красит/жирнит label. Применяется ко всем чатам,
+	// даже без ярлыка — индикация полезна сама по себе.
+	function getRowStatus(row) {
+		const dot = row.querySelector('.agent-status-dot');
+		if (!dot) return null;
+		const cls = (dot.className + '').toLowerCase();
+		if (cls.includes('done-unseen') || cls.includes('--unseen')) return 'unseen';
+		if (cls.includes('done-seen') || cls.includes('--seen')) return 'seen';
+		return null;
+	}
+
+	function applyStatus(row) {
+		const btn = findFirst(row, SELECTORS.rowButton);
+		if (!btn) return null;
+		const state = getRowStatus(row);
+		const wantSeen = state === 'seen';
+		const wantUnseen = state === 'unseen';
+		// classList.toggle с условием не вызывает мутацию, если состояние совпадает —
+		// observer-loop не запускается.
+		if (btn.classList.contains('cl-status-seen') !== wantSeen) btn.classList.toggle('cl-status-seen', wantSeen);
+		if (btn.classList.contains('cl-status-unseen') !== wantUnseen) btn.classList.toggle('cl-status-unseen', wantUnseen);
+		return state;
+	}
+
 	function decorateAll() {
 		const labels = loadStoredLabels();
 		const rows = findAll(document, SELECTORS.row).filter(r => !r.closest('.cl-tagged-group'));
-		for (const row of rows) applyBadge(row, labels);
+		for (const row of rows) {
+			applyBadge(row, labels);
+			applyStatus(row);
+		}
 		updateTaggedGroup();
 		return rows.length;
 	}
@@ -735,6 +778,10 @@
 		document.querySelectorAll('.cl-has-label').forEach(el => {
 			el.classList.remove('cl-has-label');
 			el.style.removeProperty('--cl-color');
+		});
+		document.querySelectorAll('.cl-status-seen, .cl-status-unseen').forEach(el => {
+			el.classList.remove('cl-status-seen');
+			el.classList.remove('cl-status-unseen');
 		});
 		delete window.__cursorChatLabelsCleanup;
 		console.log('[chat-labels] cleaned up');
