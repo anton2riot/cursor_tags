@@ -1,0 +1,7 @@
+#!/bin/sh
+# Автоматически применяет патч после git pull.
+# Активируется через `git config core.hooksPath .githooks` (это делает install.ps1).
+
+repo_root=$(git rev-parse --show-toplevel)
+echo "[cursor_tags] post-merge: применяю патч..."
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$repo_root/install.ps1"
