@@ -5,12 +5,16 @@
  *  - Подгружается из workbench.html как ES-module.
  *  - Конфиг ярлыков лежит в соседнем labels.js (его можно править).
  *  - Ярлык применённый к чату сохраняется в localStorage по ключу заголовка.
- *  - DOM обновляется через MutationObserver с защитой от self-loop:
- *      1) флаг `suppressing` пока идут наши мутации (сбрасывается через rAF);
- *      2) дебаунс scheduleDecorate (мин. интервал 100ms);
- *      3) applyBadge / setFilter идемпотентны — DOM трогается только если
- *         реальное состояние отличается. Каждый слой независимо разрывает
- *         цикл self-trigger'а observer'а.
+ *  - DOM Cursor'а на Solid: любое событие (hover, banner, focus) пересоздаёт
+ *    строку чата целиком, поэтому наш бейдж/класс теряются. Мы их восстанавливаем:
+ *      1) MutationObserver на body → при первой мутации в кадре runDecorateNow
+ *         выполняется СИНХРОННО (не ждём дебаунса) — восстановление почти мгновенно.
+ *      2) Защита от self-loop: флаг `suppressing` пока идут наши мутации
+ *         (сбрасывается через rAF) + флаг `firedThisFrame` (не больше одного раза за кадр).
+ *      3) applyBadge идемпотентен — DOM трогается только если реальное состояние
+ *         отличается. Каждый слой независимо разрывает цикл.
+ *  - contextmenu делегирован на document (capture=true) — listener никогда не теряется
+ *    при ререндере, ПКМ работает мгновенно.
  */
 (function() {
 	'use strict';
@@ -31,7 +35,6 @@
 .cl-menu-icon { width: 14px; text-align: center; flex-shrink: 0; }
 `;
 
-	// Re-run protection
 	if (window.__cursorChatLabelsCleanup) {
 		try { window.__cursorChatLabelsCleanup(); } catch (e) { /* ignore */ }
 	}
@@ -42,9 +45,7 @@
 	document.head.appendChild(styleEl);
 
 	const STORAGE_KEY = 'cursor-chat-labels-v1';
-	const MIN_DECORATE_INTERVAL_MS = 100;
 
-	// Fallback на случай если labels.js не загрузился.
 	const DEFAULT_LABELS = [
 		{ id: 'important', title: 'ВАЖНО',     color: '#e34234', icon: '🔴' },
 		{ id: 'check',     title: 'ПРОВЕРИТЬ', color: '#9b59b6', icon: '🔍' },
@@ -95,12 +96,19 @@
 			if (v) return v;
 		}
 		const titleEl = findFirst(row, SELECTORS.rowTitle);
-		if (titleEl && titleEl.textContent) return titleEl.textContent.trim();
+		if (titleEl && titleEl.textContent) {
+			// Текст может содержать наш бейдж как первый child — берём только trailing text.
+			let txt = '';
+			for (const node of titleEl.childNodes) {
+				if (node.nodeType === Node.ELEMENT_NODE && node.classList && node.classList.contains('cl-badge')) continue;
+				txt += node.textContent || '';
+			}
+			return txt.trim() || titleEl.textContent.trim();
+		}
 		return null;
 	}
 
-	// Идемпотентно: трогает DOM только при реальных отличиях. Защищает от
-	// self-loop, даже если флаг suppressing случайно пропустит мутацию.
+	// Идемпотентно: трогает DOM только при реальных отличиях.
 	function applyBadge(row, labels) {
 		const key = getChatKey(row);
 		if (!key) return;
@@ -125,7 +133,6 @@
 		}
 
 		if (existing) {
-			// Если бейдж не в правильном родителе — переместить, а не дублировать.
 			if (existing.parentElement !== labelEl) {
 				labelEl.insertBefore(existing, labelEl.firstChild);
 			}
@@ -140,6 +147,56 @@
 		labelEl.insertBefore(badge, labelEl.firstChild);
 	}
 
+	function decorateAll() {
+		const labels = loadStoredLabels();
+		const rows = findAll(document, SELECTORS.row);
+		for (const row of rows) applyBadge(row, labels);
+		return rows.length;
+	}
+
+	// ---- Цикло-безопасный планировщик ----------------------------------------
+	let suppressing = false;
+	let inDecorate = false;
+	let observerDisabled = false;
+	let firedThisFrame = false;
+
+	function runDecorateNow() {
+		if (inDecorate) return;
+		inDecorate = true;
+		suppressing = true;
+		try {
+			decorateAll();
+		} catch (err) {
+			console.warn('[chat-labels] decorate err', err);
+		} finally {
+			inDecorate = false;
+			// Сбрасываем suppressing через rAF: все наши мутации к этому моменту
+			// уже придут в observer (он async) и будут проигнорированы.
+			requestAnimationFrame(() => { suppressing = false; });
+		}
+	}
+
+	let observerErrors = 0;
+	const observer = new MutationObserver(() => {
+		if (suppressing || observerDisabled || firedThisFrame) return;
+		firedThisFrame = true;
+		// Сбрасываем флаг ровно на следующем кадре. Это даёт не больше одного
+		// runDecorateNow за кадр (если Cursor мутирует часто), но первый — синхронный.
+		requestAnimationFrame(() => { firedThisFrame = false; });
+		try {
+			runDecorateNow();
+		} catch (err) {
+			observerErrors++;
+			console.warn('[chat-labels] observer err', err);
+			if (observerErrors > 10) {
+				console.error('[chat-labels] too many errors, disabling observer');
+				observer.disconnect();
+				observerDisabled = true;
+			}
+		}
+	});
+
+	// ---- Меню ----------------------------------------------------------------
 	function showMenu(row, x, y) {
 		document.querySelectorAll('.cl-menu').forEach(m => m.remove());
 		const key = getChatKey(row);
@@ -172,8 +229,11 @@
 				if (label.id === 'none') delete current[key];
 				else current[key] = label.id;
 				saveStoredLabels(current);
-				runDecorateNow();
 				menu.remove();
+				// Применяем мгновенно + ещё раз после rAF, на случай если закрытие меню
+				// вызовет ререндер row (потеря hover/focus).
+				runDecorateNow();
+				requestAnimationFrame(runDecorateNow);
 			});
 			menu.appendChild(item);
 		}
@@ -198,76 +258,19 @@
 		}, 0);
 	}
 
-	function bindRow(row) {
-		if (row.dataset.clBound === '1') return;
-		const btn = findFirst(row, SELECTORS.rowButton);
-		if (!btn) return;
-		row.dataset.clBound = '1';
-		const handler = (ev) => {
-			ev.preventDefault();
-			ev.stopPropagation();
-			showMenu(row, ev.clientX, ev.clientY);
-		};
-		row.addEventListener('contextmenu', handler, true);
-		btn.addEventListener('contextmenu', handler, true);
-	}
-
-	function decorateAll() {
-		const labels = loadStoredLabels();
-		const rows = findAll(document, SELECTORS.row);
-		for (const row of rows) { bindRow(row); applyBadge(row, labels); }
-		return rows.length;
-	}
-
-	// ---- Цикло-безопасный планировщик ----------------------------------------
-	let suppressing = false;
-	let scheduled = false;
-	let inDecorate = false;
-	let lastDecorate = 0;
-	let observerDisabled = false;
-
-	function runDecorateNow() {
-		if (inDecorate) return;
-		inDecorate = true;
-		suppressing = true;
-		try {
-			decorateAll();
-		} catch (err) {
-			console.warn('[chat-labels] decorate err', err);
-		} finally {
-			inDecorate = false;
-			lastDecorate = performance.now();
-			requestAnimationFrame(() => { suppressing = false; });
-		}
-	}
-
-	function scheduleDecorate() {
-		if (scheduled || suppressing || observerDisabled) return;
-		scheduled = true;
-		const elapsed = performance.now() - lastDecorate;
-		const wait = Math.max(0, MIN_DECORATE_INTERVAL_MS - elapsed);
-		setTimeout(() => {
-			scheduled = false;
-			if (observerDisabled) return;
-			requestAnimationFrame(runDecorateNow);
-		}, wait);
-	}
-
-	let observerErrors = 0;
-	const observer = new MutationObserver(() => {
-		if (suppressing || observerDisabled) return;
-		try {
-			scheduleDecorate();
-		} catch (err) {
-			observerErrors++;
-			console.warn('[chat-labels] observer err', err);
-			if (observerErrors > 5) {
-				console.error('[chat-labels] too many errors, disabling observer');
-				observer.disconnect();
-				observerDisabled = true;
-			}
-		}
-	});
+	// Делегированный contextmenu listener — не теряется при ререндере строк.
+	const contextMenuHandler = (ev) => {
+		const target = ev.target;
+		if (!(target instanceof Element)) return;
+		const row = target.closest('li.ui-sidebar-menu-item');
+		if (!row) return;
+		if (!row.querySelector('.glass-sidebar-agent-menu-btn')) return; // разделитель
+		ev.preventDefault();
+		ev.stopPropagation();
+		ev.stopImmediatePropagation();
+		showMenu(row, ev.clientX, ev.clientY);
+	};
+	document.addEventListener('contextmenu', contextMenuHandler, true);
 
 	// ---- Загрузка конфига labels.js и запуск ---------------------------------
 	(async () => {
@@ -289,18 +292,18 @@
 		observer.observe(document.body, { childList: true, subtree: true });
 		runDecorateNow();
 		const initialCount = findAll(document, SELECTORS.row).length;
-		console.log('%c[chat-labels v3] booted', 'color: #27ae60; font-weight: bold', { rowsDecorated: initialCount, labels: userLabels.length });
+		console.log('%c[chat-labels v4] booted', 'color: #27ae60; font-weight: bold', { rowsDecorated: initialCount, labels: userLabels.length });
 	})();
 
 	window.__cursorChatLabelsCleanup = function() {
 		observerDisabled = true;
 		observer.disconnect();
+		document.removeEventListener('contextmenu', contextMenuHandler, true);
 		document.querySelectorAll('.cl-badge, .cl-menu, #cursor-chat-labels-style').forEach(el => el.remove());
 		document.querySelectorAll('.cl-has-label').forEach(el => {
 			el.classList.remove('cl-has-label');
 			el.style.removeProperty('--cl-color');
 		});
-		document.querySelectorAll('[data-cl-bound="1"]').forEach(el => delete el.dataset.clBound);
 		delete window.__cursorChatLabelsCleanup;
 		console.log('[chat-labels] cleaned up');
 	};
@@ -311,8 +314,7 @@
 		console.log('Container found:', !!findFirst(document, SELECTORS.listContainer));
 		console.log('Stored labels:', loadStoredLabels());
 		console.log('Active label set:', LABELS);
-		console.log('Suppressing:', suppressing, '| Scheduled:', scheduled, '| Disabled:', observerDisabled);
-		console.log('Last decorate (ms ago):', Math.round(performance.now() - lastDecorate));
+		console.log('Suppressing:', suppressing, '| FiredThisFrame:', firedThisFrame, '| Disabled:', observerDisabled);
 		console.log('Observer errors:', observerErrors);
 		console.groupEnd();
 	};
