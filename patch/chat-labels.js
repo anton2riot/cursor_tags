@@ -1103,6 +1103,20 @@
 		}
 
 		document.body.appendChild(menu);
+		// Clamp в viewport: если меню вылезает за нижний/правый край — сдвигаем
+		// вверх/влево от курсора. Защита от верха/лева — минимум 4px от края.
+		const rect = menu.getBoundingClientRect();
+		const vw = window.innerWidth;
+		const vh = window.innerHeight;
+		const margin = 4;
+		let left = x;
+		let top = y;
+		if (left + rect.width + margin > vw) left = Math.max(margin, x - rect.width);
+		if (top + rect.height + margin > vh) top = Math.max(margin, y - rect.height);
+		if (left < margin) left = margin;
+		if (top < margin) top = margin;
+		menu.style.left = left + 'px';
+		menu.style.top = top + 'px';
 		const closeOnce = (ev) => {
 			if (!menu.contains(ev.target)) {
 				menu.remove();
