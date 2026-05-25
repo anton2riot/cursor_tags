@@ -13,23 +13,33 @@ A patch that upgrades the chat sidebar in Cursor: labels, a separate Tagged sect
 
 ## Install
 
+**Windows:**
 ```powershell
 git clone git@github.com:anton2riot/cursor_tags.git
 cd cursor_tags
 .\install.ps1
 ```
 
+**macOS / Linux:**
+```bash
+git clone git@github.com:anton2riot/cursor_tags.git
+cd cursor_tags
+./install.sh
+```
+
 Restart Cursor.
+
+On macOS/Linux the static `composers.js` snapshot is not generated — costs are populated by the runtime fetch/XHR hook the first time you open each chat. On Windows the snapshot is built up-front from `state.vscdb`.
 
 ## Update
 
-```powershell
+```bash
 git pull
 ```
 
-`install.ps1` runs automatically via a git hook. If for any reason it doesn't, run it manually.
+The installer for your OS runs automatically via a git hook. If for any reason it doesn't, run it manually.
 
-When Cursor auto-updates itself, the patch is wiped — just re-run `.\install.ps1`.
+When Cursor auto-updates itself, the patch is wiped — just re-run the installer.
 
 ## Custom labels
 
@@ -45,13 +55,16 @@ export const labels = [
 
 `id` is an internal key (not shown in the UI — don't change it on labels already in use or you'll lose the marks on chats). `title`, `color`, `icon` are what shows up in the menu and on the chat.
 
-After editing, run `.\install.ps1` and restart Cursor.
+After editing, run the installer for your OS and restart Cursor.
 
 ## Uninstall
 
 ```powershell
+# Windows
 .\uninstall.ps1
 ```
+
+(macOS / Linux uninstall script not yet bundled — remove the `cursor-chat-labels/` folder from the workbench directory and the `<!-- cursor-chat-labels:start --> … :end -->` block from `workbench.html` by hand.)
 
 Marks on chats stay in `localStorage` — if you reinstall later, they come back.
 

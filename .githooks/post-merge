@@ -1,7 +1,18 @@
 #!/bin/sh
 # Автоматически применяет патч после git pull.
-# Активируется через `git config core.hooksPath .githooks` (это делает install.ps1).
+# Активируется через `git config core.hooksPath .githooks` (это делает install.ps1 / install.sh).
 
 repo_root=$(git rev-parse --show-toplevel)
 echo "[cursor_tags] post-merge: применяю патч..."
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$repo_root/install.ps1"
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$repo_root/install.ps1"
+        ;;
+    Darwin|Linux)
+        sh "$repo_root/install.sh"
+        ;;
+    *)
+        echo "[cursor_tags] post-merge: unsupported OS $(uname -s), skipping" >&2
+        ;;
+esac

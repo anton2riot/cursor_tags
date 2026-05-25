@@ -792,16 +792,26 @@
 		const now = Date.now();
 		// Берём самый свежий клик, который ещё не «вышел». Если в окне восемь
 		// секунд было два клика, второй вероятнее — он перезапишет первый.
-		let best = null;
+		let title = null;
 		for (let i = recentClicks.length - 1; i >= 0; i--) {
-			if (now - recentClicks[i].at < COST_RECENT_CLICK_TTL_MS) { best = recentClicks[i]; break; }
+			if (now - recentClicks[i].at < COST_RECENT_CLICK_TTL_MS) { title = recentClicks[i].title; break; }
 		}
-		if (!best) return;
+		// Fallback: новый чат через «New chat» (кнопка, не строка сайдбара) —
+		// клика по строке нет, но активная строка сайдбара указывает на нужный чат.
+		// Без этого composerId «новорождённых» чатов ловится только после рестарта,
+		// когда юзер впервые тыкает их в сайдбаре.
+		if (!title) {
+			for (const r of findAll(document, SELECTORS.row)) {
+				if (r.closest('.cl-tagged-group')) continue;
+				if (isRowActive(r)) { title = getChatKey(r); break; }
+			}
+		}
+		if (!title) return;
 		const rt = loadRuntimeComposers();
-		if (rt[best.title] && rt[best.title].composerId === composerId) return;
-		rt[best.title] = { composerId, capturedAt: now };
+		if (rt[title] && rt[title].composerId === composerId) return;
+		rt[title] = { composerId, capturedAt: now };
 		saveRuntimeComposers(rt);
-		console.log('[chat-labels] live-captured composerId', composerId.slice(0, 8) + '…', '→', best.title);
+		console.log('[chat-labels] live-captured composerId', composerId.slice(0, 8) + '…', '→', title);
 	}
 
 	const _clickTracker = (ev) => {
