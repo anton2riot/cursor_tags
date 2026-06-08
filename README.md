@@ -1,13 +1,11 @@
 # cursor_tags
 
-A patch that upgrades the chat sidebar in Cursor: labels, a separate Tagged section, pin moved into the context menu, Fork Chat back in that menu, unread indication relocated to the title color, and a hotkey to cycle the chat model.
+A patch that upgrades the chat sidebar in Cursor: labels, a separate Tagged section, Fork Chat back in the right-click menu, unread indication relocated to the title color, and a hotkey to cycle the chat model.
 
 ## What it does
 
 - **Labels on chats.** Right-click a chat → pick a label (IMPORTANT / REVIEW / TODO or whatever you define). The label icon takes the slot of the native status dot, and a thin colored stripe appears on the left side of the chat row.
 - **Tagged section** in the sidebar. A separate group below Pinned that lists every chat with a label. Click switches to the chat; right-click opens the same menu as on the original.
-- **Labels survive renaming.** A chat's label is stored by name (chat rows have no stable id in the DOM). When you rename a chat, the patch detects it and moves the label to the new name, so the mark isn't lost.
-- **Pin / Unpin moved into the context menu.** The native dot/pin button is now occupied by our label icon, so Pin/Unpin lives in our menu.
 - **Fork Chat in the context menu.** Replacing the native right-click menu hid Cursor's "Fork Chat" action — we bring it back as a menu item that triggers the native fork.
 - **Switch model by hotkey.** Press `Ctrl+Space` while the chat input is focused to cycle through a model pool you define (see below).
 - **Unread indication via title color.** Cursor used to show that a chat has a new reply by coloring the dot — we covered the dot with our icon, so the state was moved onto the chat title color (blue = there's something new).
