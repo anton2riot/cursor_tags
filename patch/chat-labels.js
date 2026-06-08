@@ -650,9 +650,56 @@
 		return state;
 	}
 
+	// Тег хранится по имени чата (стабильного id в DOM у строк нет — проверено
+	// через __cursorChatLabelsInspect). При переименовании ключ протухает и тег
+	// "теряется". Детектор ниже ловит переименование и переносит тег на новое имя.
+	//
+	// Как отличаем переименование от переключения чата / реюза DOM-узла:
+	//  - WeakMap помнит последний заголовок КАЖДОГО узла-строки. Переключение
+	//    активного чата НЕ меняет текст у существующих строк (меняется лишь класс
+	//    активности), поэтому само по себе не триггерит детектор.
+	//  - Срабатываем, только если у того же узла сменился собственный текст И
+	//    старого имени больше нет ни на одной видимой строке (старое имя исчезло
+	//    => это именно переименование, а не подмена содержимого узла при скролле).
+	const _rowTitles = new WeakMap();
+	function migrateRenamedChats(rows) {
+		const currentTitles = new Set();
+		for (const r of rows) { const k = getChatKey(r); if (k) currentTitles.add(k); }
+
+		let stored = null, storedChanged = false;
+		let rt = null, rtChanged = false;
+		for (const row of rows) {
+			const cur = getChatKey(row);
+			const prev = _rowTitles.get(row);
+			if (cur) _rowTitles.set(row, cur);
+			if (prev === undefined || prev === cur || !cur) continue;
+			if (currentTitles.has(prev)) continue; // старое имя ещё живо — не переименование
+
+			if (!stored) stored = loadStoredLabels();
+			if (stored[prev] != null && stored[cur] == null) {
+				stored[cur] = stored[prev];
+				delete stored[prev];
+				storedChanged = true;
+				console.log('[chat-labels] rename: тег перенесён', JSON.stringify(prev), '→', JSON.stringify(cur));
+			}
+			// live-capture composerId тоже переносим, чтобы cost-фича и резолв
+			// продолжали находить чат по новому имени.
+			if (!rt) rt = loadRuntimeComposers();
+			if (rt[prev] && !rt[cur]) {
+				rt[cur] = rt[prev];
+				delete rt[prev];
+				rtChanged = true;
+			}
+		}
+		if (storedChanged) saveStoredLabels(stored);
+		if (rtChanged) saveRuntimeComposers(rt);
+		return storedChanged;
+	}
+
 	function decorateAll() {
-		const labels = loadStoredLabels();
 		const rows = findAll(document, SELECTORS.row).filter(r => !r.closest('.cl-tagged-group'));
+		migrateRenamedChats(rows);
+		const labels = loadStoredLabels();
 		for (const row of rows) {
 			applyBadge(row, labels);
 			applyStatus(row);
@@ -1065,6 +1112,22 @@
 		}
 		menu.appendChild(pinItem);
 
+		// Fork Chat — дёргаем нативное действие Cursor.
+		const forkItem = document.createElement('div');
+		forkItem.className = 'cl-menu-item';
+		const forkIcon = document.createElement('span');
+		forkIcon.className = 'cl-menu-icon';
+		forkIcon.textContent = '🍴';
+		forkItem.appendChild(forkIcon);
+		const forkText = document.createElement('span');
+		forkText.textContent = 'Fork Chat';
+		forkItem.appendChild(forkText);
+		forkItem.addEventListener('click', () => {
+			menu.remove();
+			forkChatForRow(row);
+		});
+		menu.appendChild(forkItem);
+
 		const sep = document.createElement('div');
 		sep.className = 'cl-menu-sep';
 		menu.appendChild(sep);
@@ -1094,72 +1157,6 @@
 				requestAnimationFrame(runDecorateNow);
 			});
 			menu.appendChild(item);
-		}
-
-		// Cost item — внизу меню. Не закрывает меню при клике (можно ткнуть для refresh).
-		{
-			const sepCost = document.createElement('div');
-			sepCost.className = 'cl-menu-sep';
-			menu.appendChild(sepCost);
-
-			const costItem = document.createElement('div');
-			costItem.className = 'cl-menu-item cl-cost-item';
-			const costIcon = document.createElement('span');
-			costIcon.className = 'cl-menu-icon';
-			costIcon.textContent = '💰';
-			costItem.appendChild(costIcon);
-			const costText = document.createElement('span');
-			costText.className = 'cl-cost-text';
-			costItem.appendChild(costText);
-
-			// Состояния выводятся в costText. costItem.title — для подробностей в tooltip.
-			const candidates = findComposersForKey(key);
-			const suffix = candidates.length > 1 ? ` · ${candidates.length} чатов с этим именем` : '';
-
-			const renderCost = (data, opts = {}) => {
-				costText.textContent = fmtCostLine(data) + suffix + (opts.stale ? ' · кэш' : '');
-				costText.classList.remove('cl-cost-error');
-				const composerId = opts.composerId;
-				const tip = [
-					'charged: ' + fmtCents(data.chargedCents),
-					'token cost: ' + fmtCents(data.tokenCents),
-					'events: ' + data.eventCount,
-					composerId ? 'composerId: ' + composerId : null
-				].filter(Boolean).join('\n');
-				costItem.title = tip;
-			};
-			const renderError = (msg) => {
-				costText.textContent = 'Стоимость: ' + msg;
-				costText.classList.add('cl-cost-error');
-			};
-
-			if (!composersByName) {
-				renderError('composers.js не загружен — перезапусти install.ps1');
-			} else if (candidates.length === 0) {
-				renderError('composerId не известен — открой этот чат и сделай в нём любой запрос, потом снова ткни ПКМ');
-			} else {
-				const primary = candidates[0];
-				costItem.classList.add('cl-cost-clickable');
-				costText.textContent = 'Стоимость: загрузка…';
-				let inFlight = false;
-				const run = (force) => {
-					if (inFlight) return;
-					inFlight = true;
-					costText.textContent = 'Стоимость: ' + (force ? 'обновление…' : 'загрузка…');
-					costText.classList.remove('cl-cost-error');
-					fetchChatCost(primary.composerId, { force }).then(data => {
-						renderCost(data, { composerId: primary.composerId, stale: false });
-					}).catch(err => {
-						renderError(err.message || String(err));
-					}).finally(() => { inFlight = false; });
-				};
-				costItem.addEventListener('click', (ev) => {
-					ev.stopPropagation();
-					run(true);
-				});
-				run(false);
-			}
-			menu.appendChild(costItem);
 		}
 
 		document.body.appendChild(menu);
@@ -1197,7 +1194,75 @@
 		}, 0);
 	}
 
+	// ---- Fork Chat -----------------------------------------------------------
+	// Нативное меню Cursor (React onContextMenu на строке) мы перехватываем своим,
+	// и пункт "Fork Chat" пропал. Возвращаем его: на клик по нашему пункту заново
+	// открываем нативное меню для строки (флаг _bypassContextMenu пропускает наш
+	// перехватчик) и кликаем в нём пункт с текстом "Fork Chat" (точный лейбл взят
+	// из исходников Cursor: {id:'fork-chat', label:'Fork Chat', icon:'git-fork'}).
+	const FORK_LABEL = 'Fork Chat';
+	let _bypassContextMenu = false;
+
+	// Ищем пункт нативного меню по точному тексту: самый глубокий элемент с таким
+	// текстом, затем поднимаемся к кликабельному контейнеру. Исключаем наше меню.
+	function findNativeMenuItemByText(label) {
+		let best = null;
+		const nodes = document.querySelectorAll('[role="menuitem"], [class*="menu"] *, [role="menu"] *');
+		for (const el of nodes) {
+			if (el.closest('.cl-menu')) continue;
+			if ((el.textContent || '').replace(/\s+/g, ' ').trim() !== label) continue;
+			if (!best || best.contains(el)) best = el; // глубже = точнее
+		}
+		if (!best) return null;
+		return best.closest('[role="menuitem"], [class*="menu-item"], [class*="menuItem"], button, [role="button"], li') || best;
+	}
+
+	function forkChatForRow(row) {
+		const btn = findFirst(row, SELECTORS.rowButton) || row;
+		const rect = btn.getBoundingClientRect();
+		const opts = {
+			bubbles: true, cancelable: true,
+			clientX: rect.left + rect.width / 2,
+			clientY: rect.top + rect.height / 2,
+			button: 2
+		};
+		// Переоткрываем нативное меню (наш перехватчик пропускаем флагом).
+		_bypassContextMenu = true;
+		try {
+			btn.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerId: 1, pointerType: 'mouse', button: 2, buttons: 2 }));
+			btn.dispatchEvent(new MouseEvent('contextmenu', opts));
+		} catch (err) {
+			console.warn('[chat-labels] fork: contextmenu dispatch failed', err);
+		}
+		requestAnimationFrame(() => { _bypassContextMenu = false; });
+
+		// Ждём появления нативного меню и кликаем "Fork Chat" РОВНО один раз.
+		// Полная pointer+click цепочка тут даёт два срабатывания onSelect (пункт
+		// реагирует и на dispatched click, и на .click()) — поэтому одиночный click.
+		const deadline = Date.now() + 1000;
+		let done = false;
+		const tryClick = () => {
+			if (done) return;
+			const item = findNativeMenuItemByText(FORK_LABEL);
+			if (item) {
+				done = true;
+				const r = item.getBoundingClientRect();
+				item.dispatchEvent(new MouseEvent('click', {
+					bubbles: true, cancelable: true,
+					clientX: r.left + r.width / 2,
+					clientY: r.top + r.height / 2,
+					button: 0
+				}));
+				return;
+			}
+			if (Date.now() < deadline) { requestAnimationFrame(tryClick); return; }
+			console.warn('[chat-labels] пункт "Fork Chat" не найден в нативном меню');
+		};
+		requestAnimationFrame(tryClick);
+	}
+
 	const contextMenuHandler = (ev) => {
+		if (_bypassContextMenu) return; // наш же синтетический ПКМ для форка — пропускаем
 		const target = ev.target;
 		if (!(target instanceof Element)) return;
 		const row = target.closest('li.ui-sidebar-menu-item');
@@ -1225,6 +1290,145 @@
 	};
 	document.addEventListener('contextmenu', contextMenuHandler, true);
 
+	// ---- Циклирование моделей по хоткею --------------------------------------
+	// Разметка пикера (Cursor 3.5.x): кнопка-триггер button.ui-model-picker__trigger
+	// с текстом текущей модели в span.ui-model-picker__trigger-text; раскрытое
+	// меню — [data-testid="model-picker-menu"], пункты — [data-testid="model-item-<id>"].
+	const MODEL_TRIGGER_SEL = 'button.ui-model-picker__trigger';
+	const MODEL_TRIGGER_TEXT_SEL = '.ui-model-picker__trigger-text';
+	const MODEL_MENU_SEL = '[data-testid="model-picker-menu"]';
+
+	const MODELS_BASE_URL = new URL('./models.js', import.meta.url).href;
+	let modelCycle = [];
+	let cycleHotkey = { ctrl: true, meta: false, alt: false, shift: false, code: 'Space' };
+
+	async function loadModelCycle({ bust = false } = {}) {
+		const url = bust ? `${MODELS_BASE_URL}?t=${Date.now()}` : MODELS_BASE_URL;
+		try {
+			const mod = await import(url);
+			const loaded = mod.modelCycle || mod.default;
+			if (Array.isArray(loaded)) modelCycle = loaded.filter(m => m && m.id);
+			if (mod.cycleHotkey && typeof mod.cycleHotkey === 'object') {
+				cycleHotkey = { ...cycleHotkey, ...mod.cycleHotkey };
+			}
+			console.log('[chat-labels] model cycle loaded:', modelCycle.length, 'models');
+			return true;
+		} catch (err) {
+			console.warn('[chat-labels] models.js не загрузился', err);
+			return false;
+		}
+	}
+
+	// Полная цепочка pointer/mouse событий — Solid слушает pointerdown, голого
+	// click() может не хватить (та же причина, что в togglePinForRow).
+	function fireClickChain(el) {
+		if (!el) return false;
+		const rect = el.getBoundingClientRect();
+		const opts = {
+			bubbles: true, cancelable: true,
+			clientX: rect.left + rect.width / 2,
+			clientY: rect.top + rect.height / 2,
+			button: 0
+		};
+		try {
+			el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerId: 1, pointerType: 'mouse' }));
+			el.dispatchEvent(new MouseEvent('mousedown', opts));
+			el.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerId: 1, pointerType: 'mouse' }));
+			el.dispatchEvent(new MouseEvent('mouseup', opts));
+			el.dispatchEvent(new MouseEvent('click', opts));
+			if (typeof el.click === 'function') el.click();
+			return true;
+		} catch (err) {
+			console.warn('[chat-labels] model click dispatch failed', err);
+			return false;
+		}
+	}
+
+	function waitForSelector(sel, timeout = 600) {
+		return new Promise(resolve => {
+			const immediate = document.querySelector(sel);
+			if (immediate) return resolve(immediate);
+			const start = Date.now();
+			const tick = () => {
+				const el = document.querySelector(sel);
+				if (el) return resolve(el);
+				if (Date.now() - start > timeout) return resolve(null);
+				requestAnimationFrame(tick);
+			};
+			requestAnimationFrame(tick);
+		});
+	}
+
+	// Триггер пикера в том же композере, где сейчас фокус. Поднимаемся от
+	// activeElement вверх и ищем предка, внутри которого есть кнопка модели —
+	// это и есть инпут чата (а не редактор кода). Завязка только на селектор
+	// триггера, без хардкода классов панели — устойчиво к ре-вёрстке Cursor.
+	function modelTriggerForFocus() {
+		let el = document.activeElement;
+		for (let i = 0; el && i < 25; i++, el = el.parentElement) {
+			if (el.querySelector) {
+				const t = el.querySelector(MODEL_TRIGGER_SEL);
+				if (t) return t;
+			}
+		}
+		return null;
+	}
+
+	let modelCycling = false;
+	async function cycleModel() {
+		if (modelCycling) return;
+		if (!modelCycle.length) { console.warn('[chat-labels] model cycle пуст — заполни models.js'); return; }
+		const trigger = modelTriggerForFocus() || document.querySelector(MODEL_TRIGGER_SEL);
+		if (!trigger) return;
+
+		const curText = (
+			trigger.querySelector(MODEL_TRIGGER_TEXT_SEL)?.textContent ||
+			trigger.textContent || ''
+		).trim().toLowerCase();
+		const idx = modelCycle.findIndex(m => curText.includes((m.match || m.id).toLowerCase()));
+		const next = modelCycle[(idx + 1) % modelCycle.length] || modelCycle[0];
+
+		modelCycling = true;
+		try {
+			let menu = document.querySelector(MODEL_MENU_SEL);
+			if (!menu) {
+				fireClickChain(trigger);
+				menu = await waitForSelector(MODEL_MENU_SEL, 600);
+			}
+			if (!menu) { console.warn('[chat-labels] меню моделей не открылось'); return; }
+			const item = menu.querySelector(`[data-testid="model-item-${next.id}"]`);
+			if (!item) {
+				console.warn('[chat-labels] модель не найдена в меню:', next.id, '(проверь id через __cursorChatLabelsInspectModel)');
+				fireClickChain(trigger); // закрыть меню
+				return;
+			}
+			fireClickChain(item);
+		} finally {
+			// небольшая пауза, чтобы повторное нажатие в момент анимации не сбоило
+			setTimeout(() => { modelCycling = false; }, 120);
+		}
+	}
+
+	function modelHotkeyHandler(e) {
+		const hk = cycleHotkey;
+		if (!hk) return;
+		if (e.repeat) return;
+		if (!!hk.ctrl !== e.ctrlKey) return;
+		if (!!hk.meta !== e.metaKey) return;
+		if (!!hk.alt !== e.altKey) return;
+		if (!!hk.shift !== e.shiftKey) return;
+		const codeMatch = hk.code && e.code === hk.code;
+		const keyMatch = hk.key && e.key === hk.key;
+		if (!codeMatch && !keyMatch) return;
+		// срабатываем только когда фокус в инпуте чата (рядом есть триггер модели),
+		// иначе не перехватываем хоткей у редактора кода (Ctrl+Space = автокомплит)
+		if (!modelTriggerForFocus()) return;
+		e.preventDefault();
+		e.stopPropagation();
+		cycleModel();
+	}
+	document.addEventListener('keydown', modelHotkeyHandler, true);
+
 	// ---- Загрузка конфига ----------------------------------------------------
 	const CONFIG_BASE_URL = new URL('./labels.js', import.meta.url).href;
 	async function loadConfig({ bust = false } = {}) {
@@ -1246,7 +1450,7 @@
 	}
 
 	(async () => {
-		await Promise.all([loadConfig(), loadComposers()]);
+		await Promise.all([loadConfig(), loadModelCycle(), loadComposers()]);
 		observer.observe(document.body, { childList: true, subtree: true });
 		runDecorateNow();
 		const initialCount = findAll(document, SELECTORS.row).length;
@@ -1261,6 +1465,7 @@
 	// ---- Public helpers ------------------------------------------------------
 	window.__cursorChatLabelsReloadConfig = async function() {
 		const ok = await loadConfig({ bust: true });
+		await loadModelCycle({ bust: true });
 		document.querySelectorAll('.cl-badge').forEach(el => el.remove());
 		document.querySelectorAll('.cl-has-label, .cl-hide-status').forEach(el => {
 			el.classList.remove('cl-has-label');
@@ -1275,6 +1480,7 @@
 		observerDisabled = true;
 		observer.disconnect();
 		document.removeEventListener('contextmenu', contextMenuHandler, true);
+		document.removeEventListener('keydown', modelHotkeyHandler, true);
 		document.removeEventListener('click', _clickTracker, true);
 		document.removeEventListener('mousedown', _clickTracker, true);
 		// Снимаем подмену fetch ТОЛЬКО если наш wrapper всё ещё активен —
@@ -1348,6 +1554,32 @@
 		try { localStorage.removeItem(COST_RUNTIME_COMPOSERS_KEY); }
 		catch { /* ignore */ }
 		console.log('[chat-labels] runtime composers cleared');
+	};
+
+	// Дамп пикера моделей: текущая модель (с триггера) и, если меню открыто,
+	// список доступных id для models.js. Открой пикер моделей перед вызовом,
+	// чтобы увидеть список.
+	window.__cursorChatLabelsInspectModel = function() {
+		const trigger = document.querySelector(MODEL_TRIGGER_SEL);
+		const curText = trigger
+			? (trigger.querySelector(MODEL_TRIGGER_TEXT_SEL)?.textContent || trigger.textContent || '').trim()
+			: '(триггер не найден)';
+		console.group('[chat-labels] model picker');
+		console.log('Триггер найден:', !!trigger, '| текущая модель:', curText);
+		console.log('Хоткей:', cycleHotkey);
+		console.log('Список циклирования (models.js):', modelCycle);
+		const menu = document.querySelector(MODEL_MENU_SEL);
+		if (menu) {
+			const items = [...menu.querySelectorAll('[data-testid^="model-item-"]')].map(el => ({
+				id: el.getAttribute('data-testid').replace('model-item-', ''),
+				text: (el.innerText || '').replace(/\s+/g, ' ').trim()
+			}));
+			console.table(items);
+		} else {
+			console.log('Меню закрыто — открой пикер моделей и вызови ещё раз, чтобы увидеть доступные id.');
+		}
+		console.groupEnd();
+		return menu ? 'см. таблицу выше' : 'открой дропдаун моделей и вызови снова';
 	};
 
 	// Дампит computed CSS заголовков и items группы Pinned (или Workspaces),
